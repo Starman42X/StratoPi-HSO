@@ -1,0 +1,2 @@
+# StratoPi HSO
+
