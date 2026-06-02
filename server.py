@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """StratoPi HSO - HAB dual-camera controller."""
 
-from flask import Flask, render_template, jsonify, request, send_from_directory, abort
+from flask import Flask, render_template, jsonify, request, send_from_directory, abort, Response
 import threading
 import subprocess
 import os
 import glob
+import re
 import time
 import signal
 from datetime import datetime
@@ -20,11 +21,12 @@ _lock = threading.Lock()
 
 state = {
     "recording": False,
+    "streaming": False,
     "mode": None,
     "start_time": None,
     "settings": {
-        "hq_cam": {"width": 4056, "height": 3040, "fps": 10},
-        "usb_cam": {"width": 1920, "height": 1080, "fps": 30},
+        "hq_cam": {"width": 1920, "height": 1080, "fps": 30},
+        "usb_cam": {"width": 1920, "height": 1080, "fps": 24, "prioritize_fps": True},
     },
 }
 
@@ -45,7 +47,6 @@ def find_usb_cam():
                 return dev
         except Exception:
             pass
-    # Fallback: try common paths
     for dev in ("/dev/video2", "/dev/video1", "/dev/video0"):
         if os.path.exists(dev):
             return dev
@@ -53,15 +54,20 @@ def find_usb_cam():
 
 
 def hq_cam_available():
-    try:
-        r = subprocess.run(
-            ["libcamera-hello", "--list-cameras"],
-            capture_output=True, text=True, timeout=5,
-        )
-        out = r.stdout + r.stderr
-        return "imx477" in out.lower() or ("available" in out.lower() and "camera" in out.lower())
-    except Exception:
-        return False
+    for tool in ("rpicam-hello", "libcamera-hello"):
+        try:
+            r = subprocess.run(
+                [tool, "--list-cameras"],
+                capture_output=True, text=True, timeout=5,
+            )
+            out = r.stdout + r.stderr
+            if "no cameras" in out.lower():
+                continue
+            if "imx477" in out.lower() or re.search(r"\[\d+\]", out):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def start_recording(mode):
@@ -73,60 +79,69 @@ def start_recording(mode):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = f"{mode}_{ts}"
 
-    hq_out = str(CAPTURES_DIR / f"{prefix}_hq.h264")
     usb_out = str(CAPTURES_DIR / f"{prefix}_usb.mp4")
 
-    # Pi HQ cam via libcamera-vid (outputs raw H264; wrap later if needed)
+    # Pi 4 hardware H264 encoder tops out at 1920x1080.
+    # Use MJPEG for higher resolutions (no encoder size limit).
+    use_h264 = hq["width"] <= 1920 and hq["height"] <= 1080
+    if use_h264:
+        hq_codec, hq_out = "h264", str(CAPTURES_DIR / f"{prefix}_hq.h264")
+    else:
+        hq_codec, hq_out = "mjpeg", str(CAPTURES_DIR / f"{prefix}_hq.mjpeg")
+
     hq_cmd = [
-        "libcamera-vid",
+        "rpicam-vid",
         "--width", str(hq["width"]),
         "--height", str(hq["height"]),
         "--framerate", str(hq["fps"]),
-        "--codec", "h264",
+        "--codec", hq_codec,
         "--output", hq_out,
         "--nopreview",
         "-t", "0",
         "--awb", "auto",
         "--exposure", "normal",
         "--metering", "matrix",
-        "--autofocus-mode", "continuous",
     ]
 
     usb_dev = find_usb_cam()
     usb_cmd = None
     if usb_dev:
+        dfr_val = "0" if usb.get("prioritize_fps", True) else "1"
+        subprocess.run(
+            ["v4l2-ctl", "--device", usb_dev,
+             "--set-ctrl", f"exposure_dynamic_framerate={dfr_val}"],
+            capture_output=True, timeout=3,
+        )
         usb_cmd = [
             "ffmpeg", "-y",
             "-f", "v4l2",
+            "-input_format", "mjpeg",
             "-framerate", str(usb["fps"]),
             "-video_size", f"{usb['width']}x{usb['height']}",
             "-i", usb_dev,
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "23",
+            "-c:v", "copy",
             usb_out,
         ]
 
+    log_dir = CAPTURES_DIR / "logs"
+    log_dir.mkdir(exist_ok=True)
+    hq_log = open(log_dir / f"{prefix}_hq.log", "w")
+    usb_log = open(log_dir / f"{prefix}_usb.log", "w")
+
     with _lock:
         try:
-            hq_process = subprocess.Popen(
-                hq_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            hq_process = subprocess.Popen(hq_cmd, stdout=hq_log, stderr=hq_log)
         except Exception as e:
             hq_process = None
+            hq_log.write(f"Failed to start: {e}\n")
             print(f"[HQ cam] Failed to start: {e}")
 
         if usb_cmd:
             try:
-                usb_process = subprocess.Popen(
-                    usb_cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                usb_process = subprocess.Popen(usb_cmd, stdout=usb_log, stderr=usb_log)
             except Exception as e:
                 usb_process = None
+                usb_log.write(f"Failed to start: {e}\n")
                 print(f"[USB cam] Failed to start: {e}")
 
         state["recording"] = True
@@ -170,6 +185,8 @@ def get_files():
     return files
 
 
+# ── Routes ────────────────────────────────────────────────────────────────────
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -184,6 +201,7 @@ def api_status():
         duration = int(time.time() - state["start_time"])
     return jsonify({
         "recording": state["recording"],
+        "streaming": state["streaming"],
         "mode": state["mode"],
         "duration": duration,
         "hq_cam_available": hq_avail,
@@ -198,9 +216,15 @@ def api_settings():
         return jsonify({"error": "Cannot change settings while recording"}), 400
     data = request.json or {}
     if "hq_cam" in data:
-        state["settings"]["hq_cam"].update(data["hq_cam"])
+        state["settings"]["hq_cam"].update({
+            k: v for k, v in data["hq_cam"].items()
+            if k in ("width", "height", "fps")
+        })
     if "usb_cam" in data:
-        state["settings"]["usb_cam"].update(data["usb_cam"])
+        state["settings"]["usb_cam"].update({
+            k: v for k, v in data["usb_cam"].items()
+            if k in ("width", "height", "fps", "prioritize_fps")
+        })
     return jsonify({"ok": True, "settings": state["settings"]})
 
 
@@ -208,6 +232,8 @@ def api_settings():
 def api_start():
     if state["recording"]:
         return jsonify({"error": "Already recording"}), 400
+    if state["streaming"]:
+        return jsonify({"error": "Stop live view before recording"}), 400
     mode = (request.json or {}).get("mode", "test")
     threading.Thread(target=start_recording, args=(mode,), daemon=True).start()
     time.sleep(0.3)
@@ -221,6 +247,94 @@ def api_stop():
     threading.Thread(target=stop_recording, daemon=True).start()
     time.sleep(0.3)
     return jsonify({"ok": True})
+
+
+@app.route("/stream")
+def stream_view():
+    """MJPEG live stream from Pi HQ cam for focus assist."""
+    with _lock:
+        if state["recording"]:
+            return "Cannot stream while recording", 409
+        if state["streaming"]:
+            return "Stream already active — only one viewer at a time", 409
+        state["streaming"] = True
+
+    import queue as _queue
+    cmd = [
+        "rpicam-vid",
+        "--codec", "mjpeg",
+        "--output", "-",
+        "--nopreview",
+        "-t", "0",
+        "--width", "1280",
+        "--height", "720",
+        "--framerate", "30",
+        "--awb", "auto",
+        "--exposure", "normal",
+        "--metering", "centre",
+        "--sharpness", "1.5",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    frame_q = _queue.Queue(maxsize=4)
+
+    def _reader():
+        """Background thread: parse JPEG frames from rpicam-vid stdout."""
+        buf = b""
+        try:
+            while proc.poll() is None:
+                chunk = proc.stdout.read(32768)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    start = buf.find(b'\xff\xd8')
+                    if start == -1:
+                        buf = b""
+                        break
+                    end = buf.find(b'\xff\xd9', start + 2)
+                    if end == -1:
+                        buf = buf[start:] if start else buf
+                        break
+                    frame_q.put(buf[start:end + 2], timeout=1)
+                    buf = buf[end + 2:]
+        except Exception:
+            pass
+        finally:
+            try:
+                frame_q.put(None, timeout=1)   # sentinel — tells generator to stop
+            except Exception:
+                pass
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    def generate():
+        try:
+            while True:
+                try:
+                    frame = frame_q.get(timeout=5)   # 5s timeout detects dead camera
+                except _queue.Empty:
+                    break
+                if frame is None:
+                    break
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                )
+        except GeneratorExit:
+            pass   # client disconnected
+        finally:
+            try:
+                proc.send_signal(signal.SIGINT)
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+            with _lock:
+                state["streaming"] = False
+
+    return Response(
+        generate(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 @app.route("/api/files")

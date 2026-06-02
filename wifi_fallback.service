@@ -1,0 +1,14 @@
+[Unit]
+Description=StratoPi WiFi Fallback Hotspot
+After=NetworkManager.service network-online.target
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/louis/stratopi/wifi_fallback.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

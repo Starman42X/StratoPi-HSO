@@ -15,8 +15,8 @@
   .card.full{grid-column:1/-1}
   label{display:block;color:#8b949e;font-size:.82rem;margin-bottom:5px;margin-top:14px}
   label:first-of-type{margin-top:0}
-  input[type=number]{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px 12px;border-radius:6px;font-size:.92rem;outline:none;transition:.12s}
-  input[type=number]:focus{border-color:#58a6ff}
+  input[type=number],select{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px 12px;border-radius:6px;font-size:.92rem;outline:none;transition:.12s}
+  input[type=number]:focus,select:focus{border-color:#58a6ff}
   button{padding:10px 18px;border:none;border-radius:7px;cursor:pointer;font-size:.92rem;font-weight:600;transition:.13s}
   button:disabled{opacity:.35;cursor:not-allowed}
   .btn-save{background:#1a3a1f;color:#3fb950;border:1px solid #2ea043;width:100%;margin-top:18px}
@@ -25,6 +25,8 @@
   .btn-start:not(:disabled):hover{background:#1f6feb;color:#fff}
   .btn-stop{background:#21262d;color:#8b949e;border:1px solid #30363d}
   .btn-stop:not(:disabled):hover{background:#30363d;color:#e6edf3}
+  .btn-stream{background:#1a2a1a;color:#56d364;border:1px solid #238636}
+  .btn-stream:not(:disabled):hover{background:#238636;color:#fff}
   .btn-mission{background:#3a0000;color:#f85149;border:2px solid #da3633;font-size:1rem;padding:14px 28px;letter-spacing:.02em;width:100%;margin-top:16px}
   .btn-mission:not(:disabled):hover{background:#da3633;color:#fff}
   .btn-group{display:flex;gap:10px}
@@ -55,6 +57,10 @@
   .disk-bar-wrap{background:#21262d;border-radius:4px;height:6px;margin-top:8px;overflow:hidden}
   .disk-bar{background:#238636;height:100%;border-radius:4px;transition:width .4s}
   .disk-text{font-size:.78rem;color:#8b949e;margin-top:5px}
+  #stream-img{width:100%;border-radius:6px;background:#000;display:block;max-height:480px;object-fit:contain}
+  .stream-note{font-size:.78rem;color:#8b949e;margin-top:8px}
+  optgroup{color:#484f58;font-size:.8rem}
+  option{color:#e6edf3}
   @media(max-width:640px){.grid{grid-template-columns:1fr}.card.full{grid-column:1}}
 </style>
 </head>
@@ -88,25 +94,36 @@
   <!-- Controls -->
   <div class="card">
     <h2>Recording Controls</h2>
-    <p style="color:#8b949e;font-size:.82rem;margin-bottom:14px">Test mode: quick check that both cameras are working.</p>
+    <p style="color:#8b949e;font-size:.82rem;margin-bottom:14px">Test: quick check that both cameras work.</p>
     <div class="btn-group">
       <button id="btn-start-test" class="btn-start" onclick="startRec('test')">▶ Start Test</button>
       <button id="btn-stop" class="btn-stop" onclick="stopRec()" disabled>■ Stop</button>
     </div>
     <div class="sep"></div>
-    <p style="color:#8b949e;font-size:.82rem;margin-bottom:0">Mission mode: records until manually stopped. Files are saved automatically.</p>
+    <p style="color:#8b949e;font-size:.82rem;margin-bottom:0">Mission: records until stopped. Files saved automatically.</p>
     <button id="btn-mission" class="btn-mission" onclick="startRec('mission')">🚀 START MISSION CAPTURE</button>
   </div>
 
   <!-- HQ Cam Settings -->
   <div class="card">
     <h2>Pi HQ Camera (IMX477)</h2>
-    <label>Width (px)</label>
-    <input type="number" id="hq-width" value="4056" min="640" max="4056" step="2">
-    <label>Height (px)</label>
-    <input type="number" id="hq-height" value="3040" min="480" max="3040" step="2">
-    <label>FPS</label>
-    <input type="number" id="hq-fps" value="10" min="1" max="120" step="1">
+    <label>Mode (resolution × max fps)</label>
+    <select id="hq-mode" onchange="applyHqMode()" >
+      <optgroup label="H264 — hardware encoded, .h264 output">
+        <option value="1332,990,120">1332×990 · up to 120 fps · cropped sensor</option>
+        <option value="1920,1080,60" selected>1920×1080 · up to 60 fps · 16:9 ★ recommended</option>
+      </optgroup>
+      <optgroup label="MJPEG — no encoder limit, larger files">
+        <option value="2028,1080,74">2028×1080 · up to 74 fps · 16:9 binned</option>
+        <option value="2028,1520,53">2028×1520 · up to 53 fps · full FOV binned</option>
+        <option value="4056,2160,19">4056×2160 · up to 19 fps · 4K</option>
+        <option value="4056,3040,14">4056×3040 · up to 14 fps · full 12 MP</option>
+      </optgroup>
+    </select>
+    <label>FPS <span id="hq-fps-hint" style="color:#f0883e;font-size:.78rem"></span></label>
+    <input type="number" id="hq-fps" value="30" min="1" max="120" step="1">
+    <input type="hidden" id="hq-width" value="1920">
+    <input type="hidden" id="hq-height" value="1080">
     <button class="btn-save" onclick="saveSettings()">Save Settings</button>
   </div>
 
@@ -114,12 +131,38 @@
   <div class="card">
     <h2>USB Webcam</h2>
     <label>Width (px)</label>
-    <input type="number" id="usb-width" value="1920" min="320" max="3840" step="2">
+    <input type="number" id="usb-width" value="1920" min="320" max="3264" step="2">
     <label>Height (px)</label>
-    <input type="number" id="usb-height" value="1080" min="240" max="2160" step="2">
+    <input type="number" id="usb-height" value="1080" min="240" max="2448" step="2">
     <label>FPS</label>
-    <input type="number" id="usb-fps" value="30" min="1" max="120" step="1">
-    <div style="margin-top:18px;height:38px"></div><!-- align with HQ card button -->
+    <input type="number" id="usb-fps" value="24" min="1" max="30" step="1">
+    <div style="margin-top:14px;display:flex;align-items:flex-start;gap:10px">
+      <input type="checkbox" id="usb-prioritize-fps" checked style="margin-top:3px;width:auto;accent-color:#58a6ff;cursor:pointer">
+      <div>
+        <label for="usb-prioritize-fps" style="margin:0;cursor:pointer;color:#e6edf3;font-size:.88rem">Prioritize FPS over exposure</label>
+        <p style="color:#8b949e;font-size:.75rem;margin-top:3px">
+          Unchecked: camera may drop to 3–4 fps in low light to brighten image.<br>
+          Checked: holds target fps, frames may be darker.
+        </p>
+      </div>
+    </div>
+    <div style="height:18px"></div>
+  </div>
+
+  <!-- Live View -->
+  <div class="card full">
+    <h2>Live View — Focus Assist (Pi HQ Cam)</h2>
+    <div class="btn-group">
+      <button id="btn-stream-start" class="btn-stream" onclick="startStream()">◉ Start Live View</button>
+      <button id="btn-stream-stop" class="btn-stop" onclick="stopStream()" disabled>■ Stop</button>
+    </div>
+    <p class="stream-note">
+      Streams 1280×720 @ 30 fps MJPEG. Use to check focus before launch — set focus ring to ∞ and confirm horizon sharpness.<br>
+      Live view and recording are mutually exclusive.
+    </p>
+    <div id="stream-container" style="display:none;margin-top:14px">
+      <img id="stream-img" alt="Live view" src="">
+    </div>
   </div>
 
   <!-- Files -->
@@ -142,10 +185,11 @@
     </table>
   </div>
 
-</div><!-- /grid -->
+</div>
 
 <script>
   let startTs = null;
+  let settingsLoaded = false; // only sync settings from server once — don't overwrite user edits
 
   function fmtSize(b){
     if(b<1024)return b+' B';
@@ -159,116 +203,166 @@
   }
   function fmtDate(iso){return iso.replace('T',' ').slice(0,19)}
 
+  // ── HQ mode selector ──────────────────────────────────────────────────────
+
+  function applyHqMode(){
+    const sel = document.getElementById('hq-mode');
+    const [w, h, maxFps] = sel.value.split(',').map(Number);
+    document.getElementById('hq-width').value = w;
+    document.getElementById('hq-height').value = h;
+    const fpsEl = document.getElementById('hq-fps');
+    if(parseInt(fpsEl.value) > maxFps) fpsEl.value = maxFps;
+    fpsEl.max = maxFps;
+    document.getElementById('hq-fps-hint').textContent = `(max ${maxFps} for this mode)`;
+  }
+  applyHqMode();
+
+  function syncHqModeSelector(w, h){
+    const sel = document.getElementById('hq-mode');
+    for(const opt of sel.options){
+      const [ow, oh] = opt.value.split(',').map(Number);
+      if(ow === w && oh === h){ sel.value = opt.value; break; }
+    }
+    applyHqMode();
+  }
+
+  // ── Status polling ────────────────────────────────────────────────────────
+
   async function updateStatus(){
     try{
-      const d=await fetch('/api/status').then(r=>r.json());
+      const d = await fetch('/api/status').then(r=>r.json());
 
-      // HQ cam
-      const dHq=document.getElementById('dot-hq');
-      const bHq=document.getElementById('cam-hq-badge');
+      const dHq = document.getElementById('dot-hq');
+      const bHq = document.getElementById('cam-hq-badge');
       if(d.hq_cam_available){
-        dHq.className='dot green';
-        bHq.className='cam-badge cam-ok';
-        bHq.textContent='detected';
+        dHq.className='dot green'; bHq.className='cam-badge cam-ok'; bHq.textContent='detected';
       }else{
-        dHq.className='dot red';
-        bHq.className='cam-badge cam-err';
-        bHq.textContent='not found';
+        dHq.className='dot red'; bHq.className='cam-badge cam-err'; bHq.textContent='not found';
       }
 
-      // USB cam
-      const dUsb=document.getElementById('dot-usb');
-      const bUsb=document.getElementById('cam-usb-badge');
+      const dUsb = document.getElementById('dot-usb');
+      const bUsb = document.getElementById('cam-usb-badge');
       if(d.usb_cam_device){
-        dUsb.className='dot green';
-        bUsb.className='cam-badge cam-ok';
-        bUsb.textContent=d.usb_cam_device;
+        dUsb.className='dot green'; bUsb.className='cam-badge cam-ok'; bUsb.textContent=d.usb_cam_device;
       }else{
-        dUsb.className='dot grey';
-        bUsb.className='cam-badge cam-err';
-        bUsb.textContent='not found';
+        dUsb.className='dot grey'; bUsb.className='cam-badge cam-err'; bUsb.textContent='not found';
       }
 
-      // Recording state
-      const recBadge=document.getElementById('rec-badge');
-      const modeText=document.getElementById('mode-text');
-      const dur=document.getElementById('duration');
-      const bStart=document.getElementById('btn-start-test');
-      const bStop=document.getElementById('btn-stop');
-      const bMission=document.getElementById('btn-mission');
+      const recBadge = document.getElementById('rec-badge');
+      const modeText = document.getElementById('mode-text');
+      const dur      = document.getElementById('duration');
+      const bStart   = document.getElementById('btn-start-test');
+      const bStop    = document.getElementById('btn-stop');
+      const bMission = document.getElementById('btn-mission');
+      const bStreamStart = document.getElementById('btn-stream-start');
 
       if(d.recording){
         recBadge.style.display='';
-        modeText.textContent=d.mode==='mission'?'MISSION':'Test';
-        if(d.duration!=null) startTs=Date.now()-d.duration*1000;
-        bStart.disabled=true; bStop.disabled=false; bMission.disabled=true;
-      }else{
+        modeText.textContent = d.mode==='mission' ? 'MISSION' : 'Test';
+        if(d.duration!=null) startTs = Date.now() - d.duration*1000;
+        bStart.disabled=true; bStop.disabled=false; bMission.disabled=true; bStreamStart.disabled=true;
+      } else {
         recBadge.style.display='none';
-        modeText.textContent='Idle';
+        modeText.textContent = d.streaming ? 'Live view' : 'Idle';
         dur.textContent='';
         startTs=null;
-        bStart.disabled=false; bStop.disabled=true; bMission.disabled=false;
+        bStart.disabled=d.streaming; bStop.disabled=true; bMission.disabled=d.streaming;
+        bStreamStart.disabled=false;
       }
 
-      // Settings
-      if(d.settings){
-        const s=d.settings;
-        document.getElementById('hq-width').value=s.hq_cam.width;
-        document.getElementById('hq-height').value=s.hq_cam.height;
-        document.getElementById('hq-fps').value=s.hq_cam.fps;
-        document.getElementById('usb-width').value=s.usb_cam.width;
-        document.getElementById('usb-height').value=s.usb_cam.height;
-        document.getElementById('usb-fps').value=s.usb_cam.fps;
+      // Only sync settings on first load — don't overwrite user edits on subsequent polls
+      if(!settingsLoaded && d.settings){
+        const s = d.settings;
+        syncHqModeSelector(s.hq_cam.width, s.hq_cam.height);
+        document.getElementById('hq-fps').value = s.hq_cam.fps;
+        document.getElementById('usb-width').value = s.usb_cam.width;
+        document.getElementById('usb-height').value = s.usb_cam.height;
+        document.getElementById('usb-fps').value = s.usb_cam.fps;
+        document.getElementById('usb-prioritize-fps').checked = s.usb_cam.prioritize_fps !== false;
+        settingsLoaded = true;
       }
-    }catch(e){console.error('Status error:',e)}
+    } catch(e){ console.error('Status error:', e) }
   }
 
   setInterval(()=>{
-    if(startTs){
-      document.getElementById('duration').textContent=fmtDur(Math.floor((Date.now()-startTs)/1000));
-    }
-  },1000);
+    if(startTs) document.getElementById('duration').textContent = fmtDur(Math.floor((Date.now()-startTs)/1000));
+  }, 1000);
+
+  // ── Settings ──────────────────────────────────────────────────────────────
 
   async function saveSettings(){
-    const data={
+    const data = {
       hq_cam:{
-        width:parseInt(document.getElementById('hq-width').value),
-        height:parseInt(document.getElementById('hq-height').value),
-        fps:parseInt(document.getElementById('hq-fps').value),
+        width:  parseInt(document.getElementById('hq-width').value),
+        height: parseInt(document.getElementById('hq-height').value),
+        fps:    parseInt(document.getElementById('hq-fps').value),
       },
       usb_cam:{
-        width:parseInt(document.getElementById('usb-width').value),
-        height:parseInt(document.getElementById('usb-height').value),
-        fps:parseInt(document.getElementById('usb-fps').value),
+        width:  parseInt(document.getElementById('usb-width').value),
+        height: parseInt(document.getElementById('usb-height').value),
+        fps:    parseInt(document.getElementById('usb-fps').value),
+        prioritize_fps: document.getElementById('usb-prioritize-fps').checked,
       }
     };
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-    const d=await r.json();
-    if(d.ok){const btn=document.querySelector('.btn-save');btn.textContent='✓ Saved!';setTimeout(()=>btn.textContent='Save Settings',1500);}
-    else alert('Error: '+d.error);
+    const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const d = await r.json();
+    if(d.ok){
+      const btn = document.querySelector('.btn-save');
+      btn.textContent='✓ Saved!';
+      setTimeout(()=>btn.textContent='Save Settings', 1500);
+    } else {
+      alert('Error: '+d.error);
+    }
   }
+
+  // ── Recording ─────────────────────────────────────────────────────────────
 
   async function startRec(mode){
     document.getElementById(mode==='mission'?'btn-mission':'btn-start-test').disabled=true;
-    const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
-    const d=await r.json();
+    const r = await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    const d = await r.json();
     if(!d.ok) alert('Error: '+d.error);
     updateStatus();
   }
 
   async function stopRec(){
     document.getElementById('btn-stop').disabled=true;
-    const r=await fetch('/api/stop',{method:'POST'});
-    const d=await r.json();
+    const r = await fetch('/api/stop',{method:'POST'});
+    const d = await r.json();
     if(!d.ok) alert('Error: '+d.error);
     updateStatus();
-    setTimeout(loadFiles,1500);
+    setTimeout(loadFiles, 1500);
   }
+
+  // ── Live view ─────────────────────────────────────────────────────────────
+
+  function startStream(){
+    document.getElementById('btn-stream-start').disabled=true;
+    document.getElementById('btn-stream-stop').disabled=false;
+    document.getElementById('btn-start-test').disabled=true;
+    document.getElementById('btn-mission').disabled=true;
+    document.getElementById('stream-container').style.display='';
+    // Setting the src opens the streaming connection to the server
+    document.getElementById('stream-img').src = '/stream?' + Date.now();
+  }
+
+  function stopStream(){
+    // Clearing the src causes the browser to abort the connection,
+    // which triggers GeneratorExit in the Flask generator → kills rpicam-vid
+    document.getElementById('stream-img').src = '';
+    document.getElementById('stream-container').style.display='none';
+    document.getElementById('btn-stream-start').disabled=false;
+    document.getElementById('btn-stream-stop').disabled=true;
+    document.getElementById('btn-start-test').disabled=false;
+    document.getElementById('btn-mission').disabled=false;
+  }
+
+  // ── Files ─────────────────────────────────────────────────────────────────
 
   async function loadFiles(){
     try{
-      const files=await fetch('/api/files').then(r=>r.json());
-      const tbody=document.getElementById('files-tbody');
+      const files = await fetch('/api/files').then(r=>r.json());
+      const tbody = document.getElementById('files-tbody');
       if(!files.length){
         tbody.innerHTML='<tr><td colspan="4" class="no-files">No captures yet</td></tr>';
         return;
@@ -284,32 +378,31 @@
             <button class="del-btn" onclick="deleteFile('${f.name.replace(/'/g,"\\'")}')">✕</button>
           </td>
         </tr>`).join('');
-
-      // Disk usage
-      let total=files.reduce((s,f)=>s+f.size,0);
-      const disk=document.getElementById('disk-wrap');
-      const bar=document.getElementById('disk-bar');
-      const txt=document.getElementById('disk-text');
-      const capGB=256;
-      const usedGB=total/1073741824;
-      const pct=Math.min(100,(usedGB/capGB)*100);
-      disk.style.display='';
-      bar.style.width=pct.toFixed(1)+'%';
-      bar.style.background=pct>85?'#da3633':pct>60?'#f0883e':'#238636';
-      txt.textContent=`${fmtSize(total)} used of ${capGB} GB (${pct.toFixed(1)}%)`;
-    }catch(e){console.error('Files error:',e)}
+      let total = files.reduce((s,f)=>s+f.size, 0);
+      const capGB = 256, usedGB = total/1073741824;
+      const pct = Math.min(100,(usedGB/capGB)*100);
+      const diskWrap = document.getElementById('disk-wrap');
+      const bar = document.getElementById('disk-bar');
+      const txt = document.getElementById('disk-text');
+      diskWrap.style.display='';
+      bar.style.width = pct.toFixed(1)+'%';
+      bar.style.background = pct>85?'#da3633':pct>60?'#f0883e':'#238636';
+      txt.textContent = `${fmtSize(total)} used of ${capGB} GB (${pct.toFixed(1)}%)`;
+    } catch(e){ console.error('Files error:',e) }
   }
 
   async function deleteFile(name){
-    if(!confirm('Delete '+name+'?'))return;
+    if(!confirm('Delete '+name+'?')) return;
     await fetch('/api/delete/'+encodeURIComponent(name),{method:'DELETE'});
     loadFiles();
   }
 
+  // ── Init ──────────────────────────────────────────────────────────────────
+
   updateStatus();
-  setInterval(updateStatus,4000);
+  setInterval(updateStatus, 4000);
   loadFiles();
-  setInterval(loadFiles,30000);
+  setInterval(loadFiles, 30000);
 </script>
 </body>
 </html>
