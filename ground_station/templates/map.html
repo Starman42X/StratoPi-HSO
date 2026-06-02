@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StratoPi HSO — Ground Station</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+  header{background:#161b22;border-bottom:1px solid #30363d;padding:10px 20px;display:flex;align-items:center;gap:20px;flex-shrink:0}
+  header h1{color:#58a6ff;font-size:1.1rem;font-weight:700}
+  .status-chip{font-size:.75rem;padding:3px 10px;border-radius:12px;font-weight:600}
+  .chip-ok{background:#1a3a1f;color:#3fb950;border:1px solid #2ea043}
+  .chip-warn{background:#3a2a00;color:#f0883e;border:1px solid #d29922}
+  .chip-err{background:#3a1a1a;color:#f85149;border:1px solid #da3633}
+  .main{display:flex;flex:1;overflow:hidden}
+  #map{flex:1;background:#1c2128}
+  .sidebar{width:340px;background:#161b22;border-left:1px solid #30363d;display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
+  .panel{border-bottom:1px solid #21262d;padding:14px}
+  .panel h3{color:#8b949e;font-size:.72rem;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px}
+  .kv{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
+  .kv-key{color:#8b949e;font-size:.82rem}
+  .kv-val{color:#e6edf3;font-size:.88rem;font-weight:600;font-family:monospace}
+  .kv-val.big{font-size:1.4rem;color:#58a6ff}
+  .kv-val.green{color:#3fb950}
+  .kv-val.orange{color:#f0883e}
+  .kv-val.red{color:#f85149}
+  .alt-bar-wrap{background:#21262d;border-radius:4px;height:8px;margin:8px 0 4px;overflow:hidden}
+  .alt-bar{background:linear-gradient(90deg,#1f6feb,#58a6ff);height:100%;border-radius:4px;transition:width .5s}
+  .alt-label{display:flex;justify-content:space-between;font-size:.72rem;color:#484f58}
+  .raw-log{flex:1;overflow-y:auto;padding:10px;font-family:monospace;font-size:.72rem;color:#484f58}
+  .raw-log .entry{color:#8b949e;margin-bottom:3px;word-break:break-all}
+  .raw-log .entry.new{color:#3fb950}
+  #no-data{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:.9rem;gap:8px}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+  .dot.green{background:#3fb950;box-shadow:0 0 6px #3fb950}
+  .dot.grey{background:#484f58}
+  .dot.pulse{animation:pulse 1s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  #track-count{color:#484f58;font-size:.75rem}
+  .compass{font-size:1.1rem}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>StratoPi HSO — Ground Station</h1>
+  <span id="rx-chip" class="status-chip chip-warn">Waiting for signal…</span>
+  <span id="src-chip" class="status-chip chip-warn" style="display:none"></span>
+  <span id="track-count"></span>
+  <span style="margin-left:auto;color:#484f58;font-size:.78rem" id="last-rx-ts"></span>
+</header>
+
+<div class="main">
+  <div id="map">
+    <div id="no-data">
+      <div style="font-size:2rem">📡</div>
+      <div>Waiting for telemetry…</div>
+      <div style="font-size:.78rem">Serial LoRa HAT or gr-lora UDP:5005</div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+
+    <!-- Altitude -->
+    <div class="panel">
+      <h3>Altitude</h3>
+      <div class="kv">
+        <span class="kv-key">MSL</span>
+        <span class="kv-val big" id="v-alt">— m</span>
+      </div>
+      <div class="alt-bar-wrap"><div class="alt-bar" id="alt-bar" style="width:0%"></div></div>
+      <div class="alt-label"><span>0</span><span>burst ~32 km</span></div>
+      <div class="kv" style="margin-top:6px">
+        <span class="kv-key">Vertical speed</span>
+        <span class="kv-val" id="v-vspeed">— m/s</span>
+      </div>
+    </div>
+
+    <!-- Position -->
+    <div class="panel">
+      <h3>Position</h3>
+      <div class="kv">
+        <span class="kv-key">Latitude</span>
+        <span class="kv-val" id="v-lat">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Longitude</span>
+        <span class="kv-val" id="v-lon">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Speed</span>
+        <span class="kv-val" id="v-speed">— km/h</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Heading</span>
+        <span class="kv-val compass" id="v-heading">—</span>
+      </div>
+    </div>
+
+    <!-- GPS health -->
+    <div class="panel">
+      <h3>GPS / Signal</h3>
+      <div class="kv">
+        <span class="kv-key">Satellites</span>
+        <span class="kv-val green" id="v-sats">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">HDOP</span>
+        <span class="kv-val" id="v-hdop">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Fix type</span>
+        <span class="kv-val" id="v-fix">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">GPS time</span>
+        <span class="kv-val" id="v-time">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Packets received</span>
+        <span class="kv-val green" id="v-rxcount">0</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Seq #</span>
+        <span class="kv-val" id="v-seq">—</span>
+      </div>
+    </div>
+
+    <!-- Raw log -->
+    <div class="panel" style="border-bottom:none;flex:1;display:flex;flex-direction:column;overflow:hidden;padding-bottom:0">
+      <h3>Raw packets</h3>
+      <div class="raw-log" id="raw-log"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  // ── Map init ───────────────────────────────────────────────────────────────
+
+  let map = null;
+  let marker = null;
+  let polyline = null;
+  let mapInitialized = false;
+  let lastSeq = -1;
+  const BURST_ALT = 32000;
+
+  const HEADING_ARROWS = {
+    N:'↑', NE:'↗', E:'→', SE:'↘', S:'↓', SW:'↙', W:'←', NW:'↖'
+  };
+
+  function bearingLabel(deg){
+    const dirs=['N','NE','E','SE','S','SW','W','NW'];
+    return dirs[Math.round(deg/45)%8];
+  }
+
+  function initMap(lat, lon){
+    const mapEl = document.getElementById('map');
+    document.getElementById('no-data').remove();
+    map = L.map(mapEl, {zoomControl: true}).setView([lat, lon], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap',
+      maxZoom: 19,
+    }).addTo(map);
+
+    // HAB marker with custom icon
+    const icon = L.divIcon({
+      html: `<div style="
+        background:#da3633;border:2px solid #fff;border-radius:50% 50% 0 50%;
+        width:18px;height:18px;transform:rotate(45deg);
+        box-shadow:0 0 8px #da363399">
+      </div>`,
+      iconSize: [18, 18],
+      iconAnchor: [9, 9],
+      className: '',
+    });
+    marker   = L.marker([lat, lon], {icon}).addTo(map);
+    polyline = L.polyline([[lat, lon]], {color:'#58a6ff', weight:2, opacity:.8}).addTo(map);
+    mapInitialized = true;
+  }
+
+  // ── Display update ─────────────────────────────────────────────────────────
+
+  function setVal(id, value, cls){
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.textContent = value;
+    if(cls) el.className = 'kv-val ' + cls;
+  }
+
+  const FIX_LABELS = {0:'No fix', 1:'GPS', 2:'DGPS', 3:'3D GPS'};
+
+  function updateUI(d){
+    const f = d.latest;
+    if(!f) return;
+
+    // Altitude
+    const altPct = Math.min(100, (f.alt / BURST_ALT) * 100);
+    setVal('v-alt', `${f.alt.toFixed(0)} m`, f.alt > 25000 ? 'orange' : 'big');
+    document.getElementById('alt-bar').style.width = altPct.toFixed(1) + '%';
+
+    // Vertical speed
+    const vs = f.vspeed;
+    setVal('v-vspeed', `${vs > 0 ? '+' : ''}${vs.toFixed(1)} m/s`,
+           vs > 0 ? 'green' : vs < -1 ? 'orange' : '');
+
+    // Position
+    setVal('v-lat',  f.lat.toFixed(6));
+    setVal('v-lon',  f.lon.toFixed(6));
+    setVal('v-speed', `${f.speed.toFixed(1)} km/h`);
+
+    const hdg  = f.heading;
+    const arr  = HEADING_ARROWS[bearingLabel(hdg)] || '';
+    setVal('v-heading', `${arr} ${hdg.toFixed(0)}° ${bearingLabel(hdg)}`);
+
+    // GPS health
+    setVal('v-sats',  f.sats,    f.sats >= 6 ? 'green' : f.sats >= 4 ? 'orange' : 'red');
+    setVal('v-hdop',  f.hdop.toFixed(1), f.hdop < 2 ? 'green' : f.hdop < 5 ? 'orange' : 'red');
+    setVal('v-fix',   FIX_LABELS[f.fix] || f.fix);
+    setVal('v-time',  f.time);
+    setVal('v-rxcount', d.rx_count, 'green');
+    setVal('v-seq',   `#${f.seq.toString().padStart(5,'0')}`);
+
+    // Status chips
+    const chip = document.getElementById('rx-chip');
+    chip.textContent = '● Receiving';
+    chip.className   = 'status-chip chip-ok';
+
+    const srcChip = document.getElementById('src-chip');
+    srcChip.style.display = '';
+    srcChip.textContent   = `via ${d.source}`;
+
+    // Last RX timestamp
+    if(d.last_rx){
+      const dt = new Date(d.last_rx);
+      document.getElementById('last-rx-ts').textContent = 'Last: ' + dt.toLocaleTimeString();
+    }
+
+    // Map
+    if(!mapInitialized && f.lat && f.lon){
+      initMap(f.lat, f.lon);
+    }
+    if(mapInitialized && f.lat && f.lon){
+      marker.setLatLng([f.lat, f.lon]);
+      marker.bindTooltip(
+        `<b>${f.callsign}</b><br>Alt: ${f.alt.toFixed(0)} m<br>Seq: #${f.seq}`,
+        {permanent: false}
+      );
+    }
+
+    // Track
+    if(d.track && d.track.length > 0 && mapInitialized){
+      const pts = d.track.map(p => [p.lat, p.lon]);
+      polyline.setLatLngs(pts);
+      document.getElementById('track-count').textContent =
+        `${d.track.length} track points`;
+    }
+  }
+
+  function updateRawLog(packets){
+    const log = document.getElementById('raw-log');
+    log.innerHTML = packets.map((p,i) =>
+      `<div class="entry${i===0?' new':''}">${p}</div>`
+    ).join('');
+  }
+
+  // ── Polling ────────────────────────────────────────────────────────────────
+
+  async function poll(){
+    try{
+      const [state, raw] = await Promise.all([
+        fetch('/api/state').then(r=>r.json()),
+        fetch('/api/raw').then(r=>r.json()),
+      ]);
+      if(state.latest) updateUI(state);
+      updateRawLog(raw);
+    } catch(e){ console.warn('Poll error:', e) }
+  }
+
+  poll();
+  setInterval(poll, 2000);
+</script>
+</body>
+</html>

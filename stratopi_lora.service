@@ -1,0 +1,16 @@
+[Unit]
+Description=StratoPi HSO LoRa Telemetry Transmitter
+After=network.target stratopi.service
+Wants=stratopi.service
+
+[Service]
+User=louis
+WorkingDirectory=/home/louis/stratopi
+ExecStart=/home/louis/stratopi/venv/bin/python lora_tx.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
