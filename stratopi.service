@@ -1,0 +1,15 @@
+[Unit]
+Description=StratoPi HSO Camera Controller
+After=network.target
+
+[Service]
+User=louis
+WorkingDirectory=/home/louis/stratopi
+ExecStart=/home/louis/stratopi/venv/bin/python server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

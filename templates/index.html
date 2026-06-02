@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StratoPi HSO</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif;padding:24px;min-height:100vh}
+  h1{color:#58a6ff;font-size:1.7rem;margin-bottom:6px;letter-spacing:-.01em}
+  .subtitle{color:#484f58;font-size:.85rem;margin-bottom:28px}
+  h2{color:#8b949e;font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;max-width:980px}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:22px}
+  .card.full{grid-column:1/-1}
+  label{display:block;color:#8b949e;font-size:.82rem;margin-bottom:5px;margin-top:14px}
+  label:first-of-type{margin-top:0}
+  input[type=number]{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px 12px;border-radius:6px;font-size:.92rem;outline:none;transition:.12s}
+  input[type=number]:focus{border-color:#58a6ff}
+  button{padding:10px 18px;border:none;border-radius:7px;cursor:pointer;font-size:.92rem;font-weight:600;transition:.13s}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  .btn-save{background:#1a3a1f;color:#3fb950;border:1px solid #2ea043;width:100%;margin-top:18px}
+  .btn-save:not(:disabled):hover{background:#2ea043;color:#fff}
+  .btn-start{background:#1f3a6e;color:#79b8ff;border:1px solid #1f6feb}
+  .btn-start:not(:disabled):hover{background:#1f6feb;color:#fff}
+  .btn-stop{background:#21262d;color:#8b949e;border:1px solid #30363d}
+  .btn-stop:not(:disabled):hover{background:#30363d;color:#e6edf3}
+  .btn-mission{background:#3a0000;color:#f85149;border:2px solid #da3633;font-size:1rem;padding:14px 28px;letter-spacing:.02em;width:100%;margin-top:16px}
+  .btn-mission:not(:disabled):hover{background:#da3633;color:#fff}
+  .btn-group{display:flex;gap:10px}
+  .status-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+  .dot.green{background:#3fb950;box-shadow:0 0 7px #3fb95088}
+  .dot.red{background:#f85149;box-shadow:0 0 7px #f8514988}
+  .dot.grey{background:#484f58}
+  .cam-badge{font-size:.75rem;padding:2px 8px;border-radius:4px}
+  .cam-ok{background:#1a3a1f;color:#3fb950;border:1px solid #2ea04355}
+  .cam-err{background:#3a1a1a;color:#f85149;border:1px solid #da363355}
+  #rec-badge{background:#da3633;color:#fff;padding:3px 10px;border-radius:5px;font-size:.78rem;font-weight:700;animation:pulse 1.1s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  #duration{font-size:1.3rem;font-weight:700;color:#f0883e;min-width:90px}
+  #mode-text{color:#8b949e;font-size:.88rem}
+  table{width:100%;border-collapse:collapse;font-size:.84rem}
+  th{text-align:left;color:#484f58;padding:8px 10px;border-bottom:1px solid #21262d;font-weight:500}
+  td{padding:9px 10px;border-bottom:1px solid #21262d;vertical-align:middle}
+  td:last-child{text-align:right;white-space:nowrap}
+  a.dl{color:#58a6ff;text-decoration:none}
+  a.dl:hover{text-decoration:underline}
+  .del-btn{color:#f85149;background:none;border:none;cursor:pointer;font-size:.82rem;padding:2px 6px;border-radius:4px}
+  .del-btn:hover{background:#3a1a1a}
+  .refresh-btn{background:none;border:1px solid #30363d;color:#8b949e;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:.78rem;margin-left:10px}
+  .refresh-btn:hover{background:#21262d}
+  .no-files{color:#484f58;text-align:center;padding:24px}
+  .sep{border-top:1px solid #30363d;margin:18px 0}
+  .disk-bar-wrap{background:#21262d;border-radius:4px;height:6px;margin-top:8px;overflow:hidden}
+  .disk-bar{background:#238636;height:100%;border-radius:4px;transition:width .4s}
+  .disk-text{font-size:.78rem;color:#8b949e;margin-top:5px}
+  @media(max-width:640px){.grid{grid-template-columns:1fr}.card.full{grid-column:1}}
+</style>
+</head>
+<body>
+<h1>StratoPi HSO</h1>
+<p class="subtitle">High-Altitude Balloon — Dual Camera Controller</p>
+
+<div class="grid">
+
+  <!-- Status -->
+  <div class="card">
+    <h2>System Status</h2>
+    <div class="status-row">
+      <div class="dot grey" id="dot-hq"></div>
+      <span style="color:#e6edf3;font-size:.9rem">Pi HQ Camera</span>
+      <span id="cam-hq-badge" class="cam-badge cam-err">checking…</span>
+    </div>
+    <div class="status-row">
+      <div class="dot grey" id="dot-usb"></div>
+      <span style="color:#e6edf3;font-size:.9rem">USB Webcam</span>
+      <span id="cam-usb-badge" class="cam-badge cam-err">checking…</span>
+    </div>
+    <div class="sep"></div>
+    <div class="status-row" style="margin-bottom:0">
+      <span id="rec-badge" style="display:none">● REC</span>
+      <span id="mode-text">Idle</span>
+      <span id="duration"></span>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="card">
+    <h2>Recording Controls</h2>
+    <p style="color:#8b949e;font-size:.82rem;margin-bottom:14px">Test mode: quick check that both cameras are working.</p>
+    <div class="btn-group">
+      <button id="btn-start-test" class="btn-start" onclick="startRec('test')">▶ Start Test</button>
+      <button id="btn-stop" class="btn-stop" onclick="stopRec()" disabled>■ Stop</button>
+    </div>
+    <div class="sep"></div>
+    <p style="color:#8b949e;font-size:.82rem;margin-bottom:0">Mission mode: records until manually stopped. Files are saved automatically.</p>
+    <button id="btn-mission" class="btn-mission" onclick="startRec('mission')">🚀 START MISSION CAPTURE</button>
+  </div>
+
+  <!-- HQ Cam Settings -->
+  <div class="card">
+    <h2>Pi HQ Camera (IMX477)</h2>
+    <label>Width (px)</label>
+    <input type="number" id="hq-width" value="4056" min="640" max="4056" step="2">
+    <label>Height (px)</label>
+    <input type="number" id="hq-height" value="3040" min="480" max="3040" step="2">
+    <label>FPS</label>
+    <input type="number" id="hq-fps" value="10" min="1" max="120" step="1">
+    <button class="btn-save" onclick="saveSettings()">Save Settings</button>
+  </div>
+
+  <!-- USB Cam Settings -->
+  <div class="card">
+    <h2>USB Webcam</h2>
+    <label>Width (px)</label>
+    <input type="number" id="usb-width" value="1920" min="320" max="3840" step="2">
+    <label>Height (px)</label>
+    <input type="number" id="usb-height" value="1080" min="240" max="2160" step="2">
+    <label>FPS</label>
+    <input type="number" id="usb-fps" value="30" min="1" max="120" step="1">
+    <div style="margin-top:18px;height:38px"></div><!-- align with HQ card button -->
+  </div>
+
+  <!-- Files -->
+  <div class="card full">
+    <h2>
+      Capture Files
+      <button class="refresh-btn" onclick="loadFiles()">↻ Refresh</button>
+    </h2>
+    <div id="disk-wrap" style="display:none;margin-bottom:14px">
+      <div class="disk-bar-wrap"><div class="disk-bar" id="disk-bar"></div></div>
+      <div class="disk-text" id="disk-text"></div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>File</th><th>Size</th><th>Date</th><th></th></tr>
+      </thead>
+      <tbody id="files-tbody">
+        <tr><td colspan="4" class="no-files">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div><!-- /grid -->
+
+<script>
+  let startTs = null;
+
+  function fmtSize(b){
+    if(b<1024)return b+' B';
+    if(b<1048576)return(b/1024).toFixed(1)+' KB';
+    if(b<1073741824)return(b/1048576).toFixed(1)+' MB';
+    return(b/1073741824).toFixed(2)+' GB';
+  }
+  function fmtDur(s){
+    const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sc=s%60;
+    return[h,m,sc].map(x=>String(x).padStart(2,'0')).join(':');
+  }
+  function fmtDate(iso){return iso.replace('T',' ').slice(0,19)}
+
+  async function updateStatus(){
+    try{
+      const d=await fetch('/api/status').then(r=>r.json());
+
+      // HQ cam
+      const dHq=document.getElementById('dot-hq');
+      const bHq=document.getElementById('cam-hq-badge');
+      if(d.hq_cam_available){
+        dHq.className='dot green';
+        bHq.className='cam-badge cam-ok';
+        bHq.textContent='detected';
+      }else{
+        dHq.className='dot red';
+        bHq.className='cam-badge cam-err';
+        bHq.textContent='not found';
+      }
+
+      // USB cam
+      const dUsb=document.getElementById('dot-usb');
+      const bUsb=document.getElementById('cam-usb-badge');
+      if(d.usb_cam_device){
+        dUsb.className='dot green';
+        bUsb.className='cam-badge cam-ok';
+        bUsb.textContent=d.usb_cam_device;
+      }else{
+        dUsb.className='dot grey';
+        bUsb.className='cam-badge cam-err';
+        bUsb.textContent='not found';
+      }
+
+      // Recording state
+      const recBadge=document.getElementById('rec-badge');
+      const modeText=document.getElementById('mode-text');
+      const dur=document.getElementById('duration');
+      const bStart=document.getElementById('btn-start-test');
+      const bStop=document.getElementById('btn-stop');
+      const bMission=document.getElementById('btn-mission');
+
+      if(d.recording){
+        recBadge.style.display='';
+        modeText.textContent=d.mode==='mission'?'MISSION':'Test';
+        if(d.duration!=null) startTs=Date.now()-d.duration*1000;
+        bStart.disabled=true; bStop.disabled=false; bMission.disabled=true;
+      }else{
+        recBadge.style.display='none';
+        modeText.textContent='Idle';
+        dur.textContent='';
+        startTs=null;
+        bStart.disabled=false; bStop.disabled=true; bMission.disabled=false;
+      }
+
+      // Settings
+      if(d.settings){
+        const s=d.settings;
+        document.getElementById('hq-width').value=s.hq_cam.width;
+        document.getElementById('hq-height').value=s.hq_cam.height;
+        document.getElementById('hq-fps').value=s.hq_cam.fps;
+        document.getElementById('usb-width').value=s.usb_cam.width;
+        document.getElementById('usb-height').value=s.usb_cam.height;
+        document.getElementById('usb-fps').value=s.usb_cam.fps;
+      }
+    }catch(e){console.error('Status error:',e)}
+  }
+
+  setInterval(()=>{
+    if(startTs){
+      document.getElementById('duration').textContent=fmtDur(Math.floor((Date.now()-startTs)/1000));
+    }
+  },1000);
+
+  async function saveSettings(){
+    const data={
+      hq_cam:{
+        width:parseInt(document.getElementById('hq-width').value),
+        height:parseInt(document.getElementById('hq-height').value),
+        fps:parseInt(document.getElementById('hq-fps').value),
+      },
+      usb_cam:{
+        width:parseInt(document.getElementById('usb-width').value),
+        height:parseInt(document.getElementById('usb-height').value),
+        fps:parseInt(document.getElementById('usb-fps').value),
+      }
+    };
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const d=await r.json();
+    if(d.ok){const btn=document.querySelector('.btn-save');btn.textContent='✓ Saved!';setTimeout(()=>btn.textContent='Save Settings',1500);}
+    else alert('Error: '+d.error);
+  }
+
+  async function startRec(mode){
+    document.getElementById(mode==='mission'?'btn-mission':'btn-start-test').disabled=true;
+    const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    const d=await r.json();
+    if(!d.ok) alert('Error: '+d.error);
+    updateStatus();
+  }
+
+  async function stopRec(){
+    document.getElementById('btn-stop').disabled=true;
+    const r=await fetch('/api/stop',{method:'POST'});
+    const d=await r.json();
+    if(!d.ok) alert('Error: '+d.error);
+    updateStatus();
+    setTimeout(loadFiles,1500);
+  }
+
+  async function loadFiles(){
+    try{
+      const files=await fetch('/api/files').then(r=>r.json());
+      const tbody=document.getElementById('files-tbody');
+      if(!files.length){
+        tbody.innerHTML='<tr><td colspan="4" class="no-files">No captures yet</td></tr>';
+        return;
+      }
+      tbody.innerHTML=files.map(f=>`
+        <tr>
+          <td style="font-family:monospace;font-size:.82rem">${f.name}</td>
+          <td style="color:#8b949e">${fmtSize(f.size)}</td>
+          <td style="color:#8b949e">${fmtDate(f.modified)}</td>
+          <td>
+            <a class="dl" href="/files/${encodeURIComponent(f.name)}" download="${f.name}">⬇ Download</a>
+            &nbsp;
+            <button class="del-btn" onclick="deleteFile('${f.name.replace(/'/g,"\\'")}')">✕</button>
+          </td>
+        </tr>`).join('');
+
+      // Disk usage
+      let total=files.reduce((s,f)=>s+f.size,0);
+      const disk=document.getElementById('disk-wrap');
+      const bar=document.getElementById('disk-bar');
+      const txt=document.getElementById('disk-text');
+      const capGB=256;
+      const usedGB=total/1073741824;
+      const pct=Math.min(100,(usedGB/capGB)*100);
+      disk.style.display='';
+      bar.style.width=pct.toFixed(1)+'%';
+      bar.style.background=pct>85?'#da3633':pct>60?'#f0883e':'#238636';
+      txt.textContent=`${fmtSize(total)} used of ${capGB} GB (${pct.toFixed(1)}%)`;
+    }catch(e){console.error('Files error:',e)}
+  }
+
+  async function deleteFile(name){
+    if(!confirm('Delete '+name+'?'))return;
+    await fetch('/api/delete/'+encodeURIComponent(name),{method:'DELETE'});
+    loadFiles();
+  }
+
+  updateStatus();
+  setInterval(updateStatus,4000);
+  loadFiles();
+  setInterval(loadFiles,30000);
+</script>
+</body>
+</html>
