@@ -1,0 +1,8 @@
+{
+  "economy_mode": true,
+  "tx_interval_economy": 55,
+  "tx_interval_normal": 35,
+  "milestones_m": [1000, 5000, 10000, 20000, 30000],
+  "triggered_m": [],
+  "lean_packets": true
+}

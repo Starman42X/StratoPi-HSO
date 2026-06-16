@@ -1,243 +1,182 @@
-# NESDR Mini 2+ — LoRa Reception Setup Guide
-## Receiving StratoPi HSO telemetry with RTL-SDR + gr-lora
+# NESDR Mini 2+ — LoRa Reception Setup
+## Receiving StratoPi HSO telemetry on Windows
 
 ---
 
-## Overview
-
-The NESDR Mini 2+ is an RTL-SDR receiver (RTL2832U + R820T2 chip).
-To decode LoRa signals you need GNU Radio with the **gr-lora** decoder plugin.
+## Signal chain
 
 ```
-NESDR Mini 2+ → GNU Radio + gr-lora → UDP:5005 → Ground Station App → Map
+Pi LoRa HAT  →  434.200 MHz RF  →  NESDR Mini 2+
+  ↓ lora_gps_test.py --tx           ↓ lora_rx.py (GNU Radio + gr-lora_sdr)
+  UKHAS packets                      UDP:5005
+                                     ↓ gs_app.py
+                                     http://localhost:5001  (live map)
 ```
 
-**HAB transmit parameters:**
-- Frequency : **434.200 MHz**
-- Modulation: LoRa SF12 · BW 125 kHz · CR 4/5
-- TX power  : 10 dBm (German legal limit)
-- Interval  : every 30 seconds
+**Transmitter parameters (must match decoder exactly):**
+
+| Parameter | Value |
+|-----------|-------|
+| Frequency | 434.200 MHz |
+| SF | 12 |
+| BW | 125 kHz |
+| CR | 4/5 |
+| Sync word | **0x12** (EBYTE E22 private network) |
+| Preamble | 12 |
+
+> The sync word is critical. LoRaWAN uses 0x34 — gr-lora defaults to 0x34 and will
+> silently drop every packet unless you set it to 0x12 for the E22.
 
 ---
 
-## Step 1 — Install RTL-SDR drivers (Windows)
+## Step 1 — Install WinUSB driver (Zadig)
 
-1. Plug in the NESDR Mini 2+.
+1. Plug in the NESDR Mini 2+
 2. Download **Zadig** from https://zadig.akeo.ie/
 3. Open Zadig → Options → List All Devices
-4. Select **Bulk-In, Interface (Interface 0)** (or "RTL2832U")
-5. Select driver: **WinUSB** (NOT libusbK or libusb-win32)
-6. Click **Install Driver** → wait for completion
-7. Verify: Device Manager → Universal Serial Bus devices → **RTL2832U** with WinUSB
+4. Select **Bulk-In, Interface (Interface 0)** (RTL2832U)
+5. Driver: **WinUSB** ← important, not libusbK
+6. Click **Replace Driver**
 
-> Only needed once. Do NOT use Zadig for the camera or other USB devices.
-
----
-
-## Step 2 — Verify reception with SDR# (optional but recommended)
-
-1. Download SDR# from https://airspy.com/download/
-2. Extract, run `install-rtlsdr.bat` (installs Zadig-based driver automatically)
-3. Open SDRSharp.exe
-4. Source: RTL-SDR (USB)
-5. Set frequency: **434.200 MHz**
-6. Bandwidth: 2.048 MHz
-7. Hit ▶ Play
-8. When the HAB transmits you should see a **chirp signal** (diagonal stripes in the waterfall)
-   — LoRa looks like frequency-sweeping chirps, very distinctive
-
-If you see the chirp, your setup is working.
+Verify: Device Manager → Universal Serial Bus devices → RTL2832U (WinUSB)
 
 ---
 
-## Step 3 — Install GNU Radio (Windows)
+## Step 2 — Verify signal with SDR# (optional but recommended)
 
-GNU Radio on Windows is easiest via the **radioconda** distribution:
+Before attempting to decode, confirm the LoRa chirp is visible.
 
-1. Download radioconda installer from:
-   https://github.com/ryanvolz/radioconda/releases/latest
-   → Get `radioconda-YYYY.MM.DD-Windows-x86_64.exe`
-2. Run installer → accept defaults → install to `C:\radioconda`
+1. Download SDR# from https://airspy.com/download/ — extract and run `install-rtlsdr.bat`
+2. Open SDRSharp.exe → Source: RTL-SDR USB
+3. Tune to **434.200 MHz**, Bandwidth 2 MHz, hit ▶
+4. On the Pi: `python lora_gps_test.py --tx --count 3 --interval 5`
+5. Watch the waterfall — LoRa SF12 looks like **sweeping diagonal chirps**, ~2.5 s each
+
+If you see chirps: hardware is working, move to Step 3.  
+If nothing: check the HAT is transmitting (`journalctl -u stratopi_lora -f` on the Pi).
+
+---
+
+## Step 3 — Install radioconda (GNU Radio for Windows)
+
+radioconda bundles GNU Radio 3.10 + all RTL-SDR support in one installer.
+
+1. Download from https://github.com/ryanvolz/radioconda/releases/latest  
+   → `radioconda-YYYY.MM.DD-Windows-x86_64.exe`
+2. Run the installer → install to `C:\radioconda` (default)
 3. Open **radioconda Prompt** from Start Menu
 4. Test:
    ```
    python -c "import gnuradio; print(gnuradio.__version__)"
    ```
+   Should print `3.10.x.x`.
 
 ---
 
-## Step 4 — Install gr-lora
+## Step 4 — Install gr-lora_sdr
 
-gr-lora (rpp0) is the standard open-source LoRa decoder for GNU Radio.
+gr-lora_sdr (EPFL / Jeannin) is the current maintained LoRa decoder for GNU Radio 3.10.
+Install it in the radioconda Prompt:
 
-In the radioconda Prompt:
-```bash
-conda install -c conda-forge gr-lora
+```
+conda install -c conda-forge gnuradio-lora_sdr
 ```
 
-If not available via conda, build from source (Linux recommended — see below).
-
-**Alternative: Use Linux (easier for gr-lora)**
-
-If you have WSL2 (Windows Subsystem for Linux) or a Linux laptop:
-```bash
-sudo apt update
-sudo apt install gnuradio gr-lora rtl-sdr
+Verify:
 ```
-
-Or build gr-lora from source:
-```bash
-sudo apt install gnuradio gnuradio-dev cmake git
-git clone https://github.com/rpp0/gr-lora.git
-cd gr-lora
-mkdir build && cd build
-cmake ..
-make -j4
-sudo make install
-sudo ldconfig
+python -c "import lora_sdr; print('OK')"
 ```
 
 ---
 
-## Step 5 — Run the LoRa decoder
+## Step 5 — Run the receiver
 
-### Option A: GNU Radio Companion (GUI)
-
-1. Open GNU Radio Companion (GRC)
-2. Create a new flowgraph with these blocks:
+In the radioconda Prompt, from the `ground_station` folder:
 
 ```
-[RTL-SDR Source] → [Low Pass Filter] → [LoRa Receiver] → [UDP Sink]
+python lora_rx.py
 ```
 
-**RTL-SDR Source settings:**
-- Sample rate: 1,000,000 (1 Msps)
-- Center freq: 434,200,000 Hz
-- Gain: 40 dB (adjust to avoid overload)
+You should see:
+```
+StratoPi HSO — LoRa Receiver
+  RTL-SDR gain : 40 dB
+  Frequency    : 434.200 MHz
+  LoRa params  : SF12 / BW125k / CR4/4 / preamble 12
+  Sync word    : 0x12  (EBYTE E22 private network)
+  UDP output   : 127.0.0.1:5005  →  gs_app.py
 
-**Low Pass Filter:**
-- Decimation: 4
-- Cutoff: 75,000 Hz
-- Transition: 10,000 Hz
-
-**LoRa Receiver (gr-lora lora_receiver):**
-- Center freq: 434,200,000
-- Bandwidth: 125,000
-- Spreading factor: 12
-- Payload length: 0 (auto)
-- Coding rate: 4 (= CR 4/5)
-- Implicit header: unchecked
-- Low datarate optimize: checked (required for SF12)
-- Decimation: 1
-
-**UDP Sink:**
-- Address: 127.0.0.1
-- Port: 5005
-- Payload size: 1472
-
-3. Run the flowgraph (▶)
-
-### Option B: Command-line (Linux, simpler)
-
-Save this as `lora_rx.py` and run it:
-
-```python
-#!/usr/bin/env python3
-"""Minimal gr-lora command-line runner."""
-import osmosdr
-from gnuradio import gr, blocks
-try:
-    from lora import lora_receiver
-except ImportError:
-    from lora_sdr import lora_receiver
-
-# Parameters matching HAB transmitter
-FREQ   = 434_200_000   # Hz
-BW     = 125_000       # Hz
-SF     = 12
-CR     = 4             # = CR 4/5 in gr-lora
-SAMP_R = 1_000_000
-
-class LoRaDecoder(gr.top_block):
-    def __init__(self):
-        super().__init__()
-        src  = osmosdr.source()
-        src.set_sample_rate(SAMP_R)
-        src.set_center_freq(FREQ)
-        src.set_gain(40)
-
-        rx = lora_receiver(BW, SF, [FREQ], BW, CR, False, 4)
-        self.connect(src, rx)
-
-tb = LoRaDecoder()
-tb.run()
+Listening on 434.200 MHz …
 ```
 
----
-
-## Step 6 — Start the Ground Station App
-
-```bash
+**In a second terminal (normal Python, not radioconda):**
+```
 cd ground_station
-pip install -r requirements.txt
-python gs_app.py --no-serial    # UDP-only mode (from gr-lora)
+pip install flask pyserial
+python gs_app.py --no-serial
 ```
 
-Open browser: **http://localhost:5001**
-
-The map will show the HAB position as soon as a packet is received.
+Open http://localhost:5001 — the map appears as soon as the first packet is decoded.
 
 ---
 
-## Antenna
+## Step 6 — Test end-to-end
 
-For 100 km+ range you **need a directional antenna** pointed at the HAB.
+On the Pi (emulated GPS, 5 s intervals for fast testing):
+```bash
+python lora_gps_test.py --tx --count 20 --interval 5
+```
 
-| Antenna                  | Gain     | Good for            |
-|--------------------------|----------|---------------------|
-| Rubber duck (included)   | 0 dBi    | < 20 km, line-of-sight|
-| 1/4-wave ground plane    | 2 dBi    | ~40 km              |
-| 5-element Yagi (433 MHz) | 10 dBi   | **100+ km** ✓       |
-| 9-element Yagi           | 14 dBi   | 200+ km             |
+On the laptop, `lora_rx.py` should print packets as they arrive and the ground
+station map should update in real time.
 
-For the launch, mount a Yagi on a tripod and track the balloon by pointing it toward the direction of climb. At high altitude (>15 km) the balloon is visible from most directions due to radio line-of-sight.
+---
 
-**Simple 1/4-wave ground plane for 434 MHz:**
-- Vertical element: 16.3 cm
-- 4 radials: 16.3 cm each, angled 45° downward
-- Connect to SMA connector, center pin = vertical element
+## Gain adjustment
+
+If signals look overloaded in SDR# (flat-topped waveform / clipping):
+- Reduce `RTL_GAIN` in `lora_rx.py` (try 30, 20, or 10)
+- The R820T2 chip can also be set with `--gain` if using `rtl_test`
+
+If you get nothing at close range (same room):
+- RTL_GAIN too low → increase to 50
+- Wrong sync word (0x34 vs 0x12) → check `SYNC_WORD` in lora_rx.py
+- SF or BW mismatch → must match lora_tx.py exactly
+
+---
+
+## PPM frequency correction
+
+Cheap RTL-SDR dongles have crystal drift (±20–100 PPM typical for NESDR Mini 2+).
+At 434 MHz, 50 PPM = 21 kHz offset — wide enough to still decode SF12/BW125.
+
+If decoding is unreliable at longer range:
+1. Find the actual chirp centre in SDR# (zoom in on the waterfall)
+2. Measure the offset from 434.200 MHz in Hz
+3. Set `self.src.set_freq_corr(ppm)` in `lora_rx.py`
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| Zadig doesn't show device | Try different USB port; check Device Manager |
-| SDR# can't open device | Reinstall WinUSB driver with Zadig |
-| No chirp in waterfall | Check HAB is transmitting; antenna connected? |
-| gr-lora not decoding | Verify SF=12, BW=125k, CR=4/5 match transmitter |
-| UDP packets not arriving | Check firewall; gs_app running on correct port |
-| Packets corrupted | Check CRC errors in gs_app log; try gain adjustment |
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| No device found | Zadig not applied | Reinstall WinUSB driver |
+| SDR# can't open | Driver conflict | Rerun Zadig, reboot |
+| Chirp visible in SDR# but no decode | Sync word mismatch | Set `SYNC_WORD = 0x12` |
+| Decode output is garbage bytes | SF/BW mismatch | Confirm SF=12, BW=125000 |
+| UDP arrives at gs_app but parse fails | Byte framing | Check gs_app raw log at `/api/raw` |
+| `import lora_sdr` fails | gr-lora_sdr not installed | `conda install -c conda-forge gnuradio-lora_sdr` |
 
 ---
 
-## Alternative: Use the second LoRa HAT as receiver
+## Antenna
 
-If gr-lora is too complex to set up before launch, use the second Waveshare
-SX1268 HAT connected to your laptop via USB-to-UART:
+| Antenna | Gain | Range |
+|---------|------|-------|
+| Rubber duck (included) | 0 dBi | < 20 km LOS |
+| 1/4-wave ground plane (DIY) | 2 dBi | ~40 km |
+| 5-el Yagi 433 MHz | 10 dBi | 100+ km ✓ |
 
-```bash
-# Ground station with serial LoRa HAT (auto-detect port)
-python gs_app.py
-
-# Or specify port explicitly:
-python gs_app.py --serial COM5          # Windows
-python gs_app.py --serial /dev/ttyUSB0  # Linux
-```
-
-The LoRa HAT on the laptop will receive the same packets and feed them to
-the ground station app automatically. No GNU Radio needed.
-
-Configure the receive HAT with the same parameters as the transmitter
-(the gs_app sends AT commands on startup to match automatically).
+**DIY 1/4-wave ground plane for 434 MHz:**  
+Vertical element = 16.3 cm, 4 radials = 16.3 cm each at 45° downward, SMA connector.

@@ -7,12 +7,14 @@ import subprocess
 import os
 import glob
 import re
+import shutil
 import time
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 app = Flask(__name__)
+app.config['TEMPLATES_AUTO_RELOAD'] = True  # pick up deployed index.html without service restart
 
 CAPTURES_DIR = Path("/home/louis/captures")
 CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -32,11 +34,636 @@ state = {
 
 hq_process = None
 usb_process = None
+_last_stop_time = 0.0
+
+# ── recording watchdog state ──────────────────────────────────────────────────
+# If rpicam-vid / ffmpeg dies mid-recording (thermal throttle, V4L2 glitch, USB
+# re-enumeration, brief power dip) the old code left state['recording']=True with
+# a dead process — silent loss of the rest of the flight. The watchdog detects a
+# dead child and respawns it into a new segment file so recording self-heals.
+_rec_hq_cmd      = None      # last HQ rpicam-vid argv (for respawn)
+_rec_usb_cmd     = None      # last USB ffmpeg argv
+_rec_hq_out      = None      # base output path (segment suffix added on respawn)
+_rec_usb_out     = None
+_rec_log_dir     = None
+_rec_prefix      = None
+_rec_restart     = {'hq': 0, 'usb': 0}
+_MAX_REC_RESTART = 30        # backstop against a restart storm (bad device)
+
+
+def _segment_path(orig, seg):
+    """Insert _pN before the extension so a respawn never overwrites the
+    already-captured partial file. seg starts at 1."""
+    p = Path(orig)
+    return str(p.with_name(f"{p.stem}_p{seg}{p.suffix}"))
+
+
+# ── DS18B20 temperature ───────────────────────────────────────────
+
+_TEMP_MAX = 120          # 10 min of history at 5 s per sample
+_temp_history = []       # [{"ts": float, "c": float}, ...]
+
+# The CELL temperature probe is pinned by its 1-wire ROM id so the heater PID
+# always controls off the right sensor. With 3× DS18B20 on the bus (cell + 2
+# env), relying on glob order would be a latent bug: a newly-enumerated env probe
+# could sort first and silently become the heater's input. The 2 env probes are
+# logged separately by sensors.py.
+CELL_DS18B20_ID = "28-000000bf78cc"
+
+
+import re as _re2
+
+# Plausible cell-temperature window. Anything outside is a bus glitch, not a
+# real reading. DS18B20 hardware range is -55..125 °C; we clamp tighter because
+# Li-ion cells in a HAB payload realistically stay within this.
+_TEMP_MIN_C = -55.0
+_TEMP_MAX_C = 110.0
+# Max believable change between 5 s samples — a battery pack's thermal mass
+# can't swing faster than this. Larger jumps are treated as suspect.
+_TEMP_MAX_STEP_C = 15.0
+
+
+def read_ds18b20(retries=3):
+    """Read the CELL DS18B20 (pinned by ROM id) — degC or None on failure.
+
+    Targets CELL_DS18B20_ID specifically so the heater never reads an env probe.
+    Falls back to the first sensor only if the pinned id is absent.
+
+    Rejects the two classic glitch artifacts that still pass the kernel CRC
+    check on a noisy / long-wire 1-wire bus:
+      * t=0     — all-zero scratchpad (CRC of all zeros is also zero, so the
+                  kernel reports 'YES' for pure garbage)
+      * t=85000 — the 85 °C power-on-reset default (sensor read before its
+                  first conversion completed)
+    Retries a few times because most 1-wire glitches are transient.
+    """
+    cell = f"/sys/bus/w1/devices/{CELL_DS18B20_ID}/w1_slave"
+    if os.path.exists(cell):
+        sensors = [cell]
+    else:
+        sensors = glob.glob("/sys/bus/w1/devices/28-*/w1_slave")
+    if not sensors:
+        return None
+    for attempt in range(retries):
+        try:
+            with open(sensors[0]) as fh:
+                raw = fh.read()
+            if "YES" not in raw:          # kernel CRC failed
+                time.sleep(0.2)
+                continue
+            m = _re2.search(r"t=(-?\d+)", raw)
+            if not m:
+                time.sleep(0.2)
+                continue
+            milli = int(m.group(1))
+            if milli == 0 or milli == 85000:   # glitch sentinels
+                time.sleep(0.2)
+                continue
+            c = round(milli / 1000.0, 1)
+            if not (_TEMP_MIN_C <= c <= _TEMP_MAX_C):
+                time.sleep(0.2)
+                continue
+            return c
+        except Exception:
+            time.sleep(0.2)
+    return None
+
+
+def _temp_poller():
+    """Background thread: poll DS18B20 every 5 s, with spike rejection."""
+    last_good = None
+    suspect = None          # candidate that broke the step limit, pending confirm
+    while True:
+        c = read_ds18b20()
+        if c is not None:
+            # Spike rejection: a single sample that jumps more than the thermal
+            # mass allows is dropped, UNLESS the next reading confirms it (a real
+            # fast change shows up on two consecutive samples; a glitch doesn't).
+            if last_good is not None and abs(c - last_good) > _TEMP_MAX_STEP_C:
+                if suspect is not None and abs(c - suspect) <= _TEMP_MAX_STEP_C:
+                    pass            # two agreeing outliers → real, accept
+                else:
+                    suspect = c     # hold this one back, wait for confirmation
+                    time.sleep(5)
+                    continue
+            suspect = None
+            last_good = c
+            with _lock:
+                _temp_history.append({"ts": time.time(), "c": c})
+                if len(_temp_history) > _TEMP_MAX:
+                    _temp_history.pop(0)
+        time.sleep(5)
+
+
+threading.Thread(target=_temp_poller, daemon=True).start()
+
+# ── GPS reader (direct serial, cooperative with lora_tx) ─────────────────────
+# Matek SAM-M10Q (u-blox SAM-M10Q) on UART5/ttyAMA5, GPIO13 (pin 33), 9600 baud.
+# Baud is auto-detected (9600 → 115200 fallback) by sniffing for valid NMEA.
+# When lora_tx is running it reads /tmp/gps_fix.json which this thread writes.
+
+import json as _json
+_gps_state      = {}
+_gps_lock       = threading.Lock()
+_LORA_LOCK_FILE = Path('/tmp/stratopi_serial_lock')
+_GPS_FIX_FILE   = Path('/tmp/gps_fix.json')
+
+
+def _patch_gps_fix_file(**extras):
+    """Merge telemetry extras into gps_fix.json for lora_tx."""
+    try:
+        d = _json.loads(_GPS_FIX_FILE.read_text()) if _GPS_FIX_FILE.exists() else {}
+        for k, v in extras.items():
+            if v is not None:
+                d[k] = v
+        d['ts'] = time.time()
+        _GPS_FIX_FILE.write_text(_json.dumps(d))
+    except Exception:
+        pass
+
+
+_GPS_PORT  = '/dev/ttyAMA5'           # UART5, GPIO13 (pin 33) RX
+_GPS_BAUDS = (9600, 115200)           # Matek SAM-M10Q default 9600; old clone was 115200
+_NMEA_KEYS = ('GGA', 'RMC', 'GLL', 'GSV', 'GSA', 'VTG', 'GNS', 'TXT')
+
+
+def _auto_open_gps():
+    """
+    Open /dev/ttyAMA5 (UART5, GPIO13 pin 33) for GPS, auto-detecting the baud
+    rate by sniffing for valid NMEA. The Matek SAM-M10Q (genuine u-blox) defaults
+    to 9600; the old module used 115200. Returns an open serial.Serial at the
+    working baud, or None.
+    """
+    try:
+        import serial as _ser
+    except ImportError:
+        return None
+    for baud in _GPS_BAUDS:
+        s = None
+        try:
+            s = _ser.Serial(_GPS_PORT, baud, timeout=1)
+            time.sleep(0.2)
+            s.reset_input_buffer()
+            t0 = time.time()
+            while time.time() - t0 < 2.5:        # sniff a couple seconds for real NMEA
+                line = s.readline().decode('ascii', errors='replace').strip()
+                if line.startswith('$') and ',' in line and line[3:6] in _NMEA_KEYS:
+                    s.timeout = 2
+                    return s
+            s.close()
+        except Exception:
+            try:
+                if s: s.close()
+            except Exception:
+                pass
+    return None
+
+
+def _gps_reader():
+    """Background thread: read GPS from /dev/ttyAMA5 (UART5 on GPIO13, pin 33).
+    GPS is on a DEDICATED UART — no conflict with LoRa on serial0/ttyAMA0.
+    Runs continuously regardless of lora_tx state; keeps gps_fix.json always fresh.
+    """
+    try:
+        import pynmea2 as _nm
+    except ImportError:
+        return
+    ser = None
+    while True:
+        if ser is None:
+            ser = _auto_open_gps()
+            if ser is None:
+                time.sleep(5)
+                continue
+
+        try:
+            line = ser.readline().decode('ascii', errors='replace').strip()
+            if not line.startswith('$'):
+                continue
+            msg = _nm.parse(line)
+            if msg.sentence_type == 'GGA':
+                ts = msg.timestamp
+                fix = {
+                    'time':   ts.strftime('%H:%M:%S') if ts else datetime.now(timezone.utc).strftime('%H:%M:%S'),
+                    'lat':    round(float(msg.latitude  or 0), 6),
+                    'lon':    round(float(msg.longitude or 0), 6),
+                    'alt':    round(float(msg.altitude  or 0), 1),
+                    'sats':   int(msg.num_sats or 0),
+                    'hdop':   float(msg.horizontal_dil or 99.9),
+                    'fix':    int(msg.gps_qual or 0),
+                    'source': 'gps',
+                    'ts':     time.time(),
+                }
+                with _gps_lock:
+                    _gps_state.update(fix)
+                try:
+                    with _lock:
+                        _hist = list(_temp_history)
+                    if _hist:
+                        fix['cell_temp'] = _hist[-1]['c']
+                    # Keep heater/cell extras written by _patch_gps_fix_file
+                    if _GPS_FIX_FILE.exists():
+                        prev = _json.loads(_GPS_FIX_FILE.read_text())
+                        if 'cell_temp' not in fix and prev.get('cell_temp') is not None:
+                            fix['cell_temp'] = prev['cell_temp']
+                        if prev.get('heater_duty') is not None:
+                            fix['heater_duty'] = prev['heater_duty']
+                    fix['ts'] = time.time()
+                    _GPS_FIX_FILE.write_text(_json.dumps(fix))
+                except Exception:
+                    pass
+            elif msg.sentence_type in ('RMC', 'VTG'):
+                upd = {}
+                spd = getattr(msg, 'spd_over_grnd_kmph', None)
+                if spd:
+                    upd['speed'] = round(float(spd), 1)
+                else:
+                    spd2 = getattr(msg, 'spd_over_grnd', None)
+                    if spd2: upd['speed'] = round(float(spd2) * 1.852, 1)
+                trk = getattr(msg, 'true_track', None)
+                if trk: upd['heading'] = round(float(trk), 1)
+                if upd:
+                    with _gps_lock:
+                        _gps_state.update(upd)
+        except Exception:
+            try: ser.close()
+            except Exception: pass
+            ser = None
+            time.sleep(1)
+
+
+# Clean up stale lock file left by crashed lora_tx (SIGKILL etc.)
+_lora_svc = subprocess.run(
+    ['systemctl','is-active','stratopi_lora.service'],
+    capture_output=True, text=True
+).stdout.strip()
+if _lora_svc != 'active' and _LORA_LOCK_FILE.exists():
+    try: _LORA_LOCK_FILE.unlink()
+    except Exception: pass
+
+threading.Thread(target=_gps_reader, daemon=True).start()
+
+
+# ── Mission GPS logger ────────────────────────────────────────────────────────
+
+_MISSION_LOG_DIR = Path("/home/louis/stratopi/logs")
+_MISSION_LOG_DIR.mkdir(exist_ok=True)
+
+_mission = {
+    'active':  False,
+    'file':    None,
+    'path':    None,
+    'count':   0,
+    'start_t': 0.0,
+}
+_mission_lock = threading.Lock()
+
+
+def _mission_log_row(h_duty=0.0, cell_temp=None):
+    """Write one telemetry row — called from heater loop every second."""
+    with _mission_lock:
+        if not _mission['active'] or _mission['file'] is None:
+            return
+    with _gps_lock:
+        g = dict(_gps_state)
+    with _flight_lock:
+        fstate = _flight_state.get('state', 'unknown')
+    row = [
+        datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        g.get('lat', ''), g.get('lon', ''), g.get('alt', ''),
+        g.get('speed', ''), g.get('heading', ''), g.get('vspeed', ''),
+        g.get('sats', ''), g.get('hdop', ''), g.get('fix', ''),
+        '' if cell_temp is None else round(cell_temp, 2),
+        round(h_duty, 1),
+        fstate,
+    ]
+    with _mission_lock:
+        if _mission['file']:
+            _mission['file'].write(','.join(str(x) for x in row) + '\n')
+            _mission['file'].flush()
+            _mission['count'] += 1
+
+
+def _mission_start(tag='mission'):
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    p = _MISSION_LOG_DIR / f"{tag}_{ts}.csv"
+    f = open(p, 'w', buffering=1)
+    hdr = 'utc,lat,lon,alt_m,speed_kmh,heading_deg,vspeed_ms,sats,hdop,fix,cell_temp_c,heater_duty_pct,flight_state\n'
+    f.write(hdr)
+    with _mission_lock:
+        _mission.update({'active': True, 'file': f, 'path': p, 'count': 0, 'start_t': time.time()})
+
+
+def _mission_stop():
+    with _mission_lock:
+        _mission['active'] = False
+        if _mission['file']:
+            _mission['file'].close()
+            _mission['file'] = None
+
+
+# ── Flight state machine ──────────────────────────────────────────────────────
+
+_flight_lock  = threading.Lock()
+_flight_state = {
+    'state':       'ground',
+    'launch_alt':  None,
+    'launch_set':  False,
+    '_asc_since':  None,
+    '_land_since': None,
+    '_wifi_off':   False,
+}
+
+_ASCENT_MS   =  1.0   # m/s  — positive vspeed to consider ascending
+_DESCENT_MS  = -1.0   # m/s  — negative vspeed to consider descending
+_LAND_VS_MAX =  0.5   # m/s  abs — max vspeed for landing
+_LAND_ALT_M  =  200   # m    above launch for landing detection
+_ASC_CONFIRM =  15    # s    of continuous ascent before state change
+
+
+def _wifi_off():
+    try:
+        subprocess.run(['ip', 'link', 'set', 'wlan0', 'down'], timeout=5, capture_output=True)
+        subprocess.run(['systemctl', 'stop', 'hostapd'], timeout=5, capture_output=True)
+        subprocess.run(['tvservice', '-o'], timeout=3, capture_output=True)
+    except Exception:
+        pass
+    with _flight_lock:
+        _flight_state['_wifi_off'] = True
+
+
+def _wifi_on():
+    try:
+        subprocess.run(['ip', 'link', 'set', 'wlan0', 'up'], timeout=5, capture_output=True)
+        time.sleep(2)
+        subprocess.run(['systemctl', 'start', 'hostapd'], timeout=5, capture_output=True)
+        subprocess.run(['tvservice', '-p'], timeout=3, capture_output=True)
+    except Exception:
+        pass
+    with _flight_lock:
+        _flight_state['_wifi_off'] = False
+
+
+def _flight_monitor():
+    while True:
+        time.sleep(5)
+        try:
+            with _gps_lock:
+                g = dict(_gps_state)
+            if not g or g.get('fix', 0) < 1:
+                continue
+            alt    = float(g.get('alt', 0) or 0)
+            vspeed = float(g.get('vspeed', 0) or 0)
+            now    = time.time()
+
+            with _flight_lock:
+                fs = _flight_state
+                st = fs['state']
+
+                if not fs['launch_set'] and st == 'ground':
+                    fs['launch_alt'] = alt
+                    fs['launch_set'] = True
+
+                la = fs['launch_alt'] or 0
+
+                if st == 'ground':
+                    if vspeed >= _ASCENT_MS:
+                        if fs['_asc_since'] is None:
+                            fs['_asc_since'] = now
+                        elif now - fs['_asc_since'] >= _ASC_CONFIRM and alt > la + 50:
+                            fs['state'] = 'ascending'
+                            fs['_asc_since'] = None
+                            threading.Thread(target=_wifi_off, daemon=True).start()
+                    else:
+                        fs['_asc_since'] = None
+
+                elif st == 'ascending':
+                    if vspeed <= _DESCENT_MS:
+                        fs['state'] = 'descending'
+
+                elif st == 'descending':
+                    if alt <= la + _LAND_ALT_M and abs(vspeed) <= _LAND_VS_MAX:
+                        if fs['_land_since'] is None:
+                            fs['_land_since'] = now
+                        elif now - fs['_land_since'] >= 30:
+                            fs['state'] = 'landed'
+                            if fs['_wifi_off']:
+                                threading.Thread(target=_wifi_on, daemon=True).start()
+                    else:
+                        fs['_land_since'] = None
+        except Exception:
+            pass
+
+
+threading.Thread(target=_flight_monitor, daemon=True).start()
+
+
+# ── Heater PID (IRFZ44N on GPIO18) ───────────────────────────────────────────
+
+_HEATER_PIN      = 18    # BCM — GPIO18 pin 12 → 100Ω → IRFZ44N gate
+_HEATER_PWM_FREQ = 100   # Hz  — fine for thermal mass
+_HEATER_MAX_A    = 4.0   # A at 100 % PWM; avg current scales linearly with duty
+
+_heater = {
+    'enabled':   False,
+    'duty':      0.0,
+    'setpoint':  10.0,    # °C
+    'temp':      None,
+    'kp':        10.0,
+    'ki':        0.05,
+    'kd':        2.0,
+    '_integral': 0.0,
+    '_last_err': 0.0,
+    '_last_t':   0.0,
+    'autotuning':  False,
+    '_tuner':      None,
+    'last_tune':   None,
+    'used_mah':       0.0,   # cumulative charge drawn by the heater (mAh)
+    '_last_charge_t': 0.0,   # timestamp of last charge integration step
+}
+_heater_lock = threading.Lock()
+_heater_pwm  = None
+
+# Persist heater settings across service restarts (Restart=always would
+# otherwise silently reset the setpoint to the 10.0 default on any crash).
+_HEATER_SETTINGS_FILE = Path("/home/louis/stratopi/heater_settings.json")
+
+def _heater_save_settings():
+    import json as _json
+    try:
+        with _heater_lock:
+            data = {k: _heater[k] for k in
+                    ('setpoint', 'kp', 'ki', 'kd', 'enabled', 'used_mah')}
+        _HEATER_SETTINGS_FILE.write_text(_json.dumps(data))
+    except Exception:
+        pass
+
+def _heater_load_settings():
+    import json as _json
+    try:
+        data = _json.loads(_HEATER_SETTINGS_FILE.read_text())
+        with _heater_lock:
+            for k in ('setpoint', 'kp', 'ki', 'kd', 'enabled', 'used_mah'):
+                if k in data:
+                    _heater[k] = data[k]
+    except Exception:
+        pass
+
+_heater_load_settings()
+
+
+class _RelayAutoTuner:
+    """
+    Relay-feedback auto-tuner (Åström-Hägglund).
+    Applies bang-bang control ±HYSTERESIS around setpoint,
+    measures oscillation period Pu and amplitude a, then
+    computes Ziegler-Nichols PID parameters.
+    Needs ~4 sign crossings (2 full cycles); at 1 s/sample
+    this takes as long as the thermal time constant allows.
+    """
+    HYSTERESIS  = 0.3   # °C
+    MIN_CROSSES = 4
+
+    def __init__(self, setpoint):
+        self.setpoint  = setpoint
+        self._heating  = True
+        self._crosses  = []       # timestamps of crossings
+        self._samples  = []       # (time, temp)
+        self.result    = None
+
+    @property
+    def crosses(self):
+        return len(self._crosses)
+
+    def update(self, temp):
+        now = time.time()
+        self._samples.append((now, temp))
+        self._samples = [(t, v) for t, v in self._samples if t >= now - 3600]
+
+        if self._heating:
+            duty = 100.0
+            if temp > self.setpoint + self.HYSTERESIS:
+                self._heating = False
+                self._crosses.append(now)
+        else:
+            duty = 0.0
+            if temp < self.setpoint - self.HYSTERESIS:
+                self._heating = True
+                self._crosses.append(now)
+
+        if len(self._crosses) >= self.MIN_CROSSES and self.result is None:
+            self._compute()
+        return duty
+
+    def _compute(self):
+        ct = self._crosses[-self.MIN_CROSSES:]
+        half_periods = [ct[i+1] - ct[i] for i in range(len(ct)-1)]
+        Pu = 2.0 * sum(half_periods) / len(half_periods)
+
+        t0 = ct[0]
+        temps = [v for t, v in self._samples if t >= t0]
+        if len(temps) < 4:
+            return
+        a = (max(temps) - min(temps)) / 2.0
+        if a < 0.05 or Pu < 5:
+            return
+
+        Ku = 4.0 * 100.0 / (3.14159265 * a)   # [%/°C]
+        self.result = {
+            'kp':       round(0.600 * Ku,       3),
+            'ki':       round(1.200 * Ku / Pu,  5),
+            'kd':       round(0.075 * Ku * Pu,  3),
+            'Ku':       round(Ku, 3),
+            'Pu_s':     round(Pu, 1),
+            'amplitude': round(a, 3),
+        }
+
+
+def _heater_init():
+    global _heater_pwm
+    try:
+        import RPi.GPIO as _GPIO
+        _GPIO.setmode(_GPIO.BCM)
+        _GPIO.setwarnings(False)
+        _GPIO.setup(_HEATER_PIN, _GPIO.OUT)
+        _heater_pwm = _GPIO.PWM(_HEATER_PIN, _HEATER_PWM_FREQ)
+        _heater_pwm.start(0)
+    except Exception as e:
+        pass
+
+
+def _heater_loop():
+    global _heater_pwm
+    _heater_init()
+    while True:
+        time.sleep(1.0)
+        try:
+            with _lock:
+                hist = list(_temp_history)
+            temp = hist[-1]['c'] if hist else None
+
+            tune_done = False
+            with _heater_lock:
+                _heater['temp'] = temp
+                if not _heater['enabled'] or temp is None:
+                    duty = 0.0
+                elif _heater['autotuning']:
+                    if _heater['_tuner'] is None:
+                        _heater['_tuner'] = _RelayAutoTuner(_heater['setpoint'])
+                    tuner = _heater['_tuner']
+                    duty  = tuner.update(temp)
+                    if tuner.result is not None:
+                        r = tuner.result
+                        _heater.update({'kp': r['kp'], 'ki': r['ki'], 'kd': r['kd'],
+                                        'last_tune': r, 'autotuning': False,
+                                        '_tuner': None, '_integral': 0.0, '_last_err': 0.0})
+                        tune_done = True
+                else:
+                    now = time.time()
+                    dt  = max(0.1, min(now - _heater['_last_t'], 10.0)) if _heater['_last_t'] else 1.0
+                    _heater['_last_t'] = now
+                    err = _heater['setpoint'] - temp
+                    max_i = 100.0 / max(_heater['ki'], 1e-6)
+                    _heater['_integral'] = max(-max_i, min(max_i, _heater['_integral'] + err * dt))
+                    d_err = (err - _heater['_last_err']) / dt
+                    _heater['_last_err'] = err
+                    duty = max(0.0, min(100.0,
+                        _heater['kp'] * err +
+                        _heater['ki'] * _heater['_integral'] +
+                        _heater['kd'] * d_err))
+                _heater['duty'] = duty
+
+                # Integrate consumed charge: avg current = (duty/100)*MAX_A, and
+                # mAh += I_mA * (dt_seconds / 3600). dt is capped so a paused loop
+                # (debugger, sleep drift) can't inject a huge bogus jump.
+                t_now = time.time()
+                if _heater['_last_charge_t']:
+                    dt_c = min(t_now - _heater['_last_charge_t'], 10.0)
+                    i_ma = (duty / 100.0) * _HEATER_MAX_A * 1000.0
+                    _heater['used_mah'] += i_ma * (dt_c / 3600.0)
+                _heater['_last_charge_t'] = t_now
+
+            if _heater_pwm is not None:
+                _heater_pwm.ChangeDutyCycle(duty)
+            if tune_done:
+                _heater_save_settings()
+            # persist the running mAh total every ~30 s so a restart doesn't lose it
+            if int(t_now) % 30 == 0:
+                _heater_save_settings()
+            _patch_gps_fix_file(cell_temp=temp, heater_duty=duty)
+            _mission_log_row(duty, temp)
+        except Exception:
+            pass
+
+
+threading.Thread(target=_heater_loop, daemon=True).start()
 
 
 def find_usb_cam():
-    """Return first USB video device path, preferring UVC devices."""
+    """Return first USB UVC video device. Skips /dev/video2 (libcamera ISP node)."""
     for dev in sorted(glob.glob("/dev/video*")):
+        if dev == "/dev/video2":
+            continue  # libcamera internal ISP / V4L2 mem2mem device — not a real camera
         try:
             r = subprocess.run(
                 ["v4l2-ctl", "--device", dev, "--info"],
@@ -47,7 +674,7 @@ def find_usb_cam():
                 return dev
         except Exception:
             pass
-    for dev in ("/dev/video2", "/dev/video1", "/dev/video0"):
+    for dev in ("/dev/video0", "/dev/video1"):
         if os.path.exists(dev):
             return dev
     return None
@@ -71,7 +698,16 @@ def hq_cam_available():
 
 
 def start_recording(mode):
-    global hq_process, usb_process
+    global hq_process, usb_process, _last_stop_time
+    global _rec_hq_cmd, _rec_usb_cmd, _rec_hq_out, _rec_usb_out
+    global _rec_log_dir, _rec_prefix, _rec_restart
+
+    # Kill any stale rpicam-vid (e.g. crashed live-stream session) and let the
+    # camera hardware reset — without this the V4L2 ISP node stays busy and the
+    # next rpicam-vid call fails with "Failed to queue buffer: Invalid argument".
+    subprocess.run(["pkill", "-SIGINT", "rpicam-vid"], capture_output=True)
+    cooldown = 2.0 - (time.time() - _last_stop_time)
+    time.sleep(max(2.0, cooldown))
 
     s = state["settings"]
     hq = s["hq_cam"]
@@ -128,13 +764,34 @@ def start_recording(mode):
     hq_log = open(log_dir / f"{prefix}_hq.log", "w")
     usb_log = open(log_dir / f"{prefix}_usb.log", "w")
 
+    if mode == 'mission':
+        _mission_start('mission')
+
     with _lock:
-        try:
-            hq_process = subprocess.Popen(hq_cmd, stdout=hq_log, stderr=hq_log)
-        except Exception as e:
-            hq_process = None
-            hq_log.write(f"Failed to start: {e}\n")
-            print(f"[HQ cam] Failed to start: {e}")
+        # Try to start HQ cam; retry once on immediate crash (V4L2 timeout)
+        for attempt in range(2):
+            try:
+                hq_process = subprocess.Popen(hq_cmd, stdout=hq_log, stderr=hq_log)
+            except Exception as e:
+                hq_process = None
+                hq_log.write(f"[Attempt {attempt + 1}] Failed to start: {e}\n")
+                print(f"[HQ cam] Attempt {attempt + 1} failed: {e}")
+                if attempt == 0:
+                    time.sleep(3)
+                    continue
+                break
+            time.sleep(2.0)  # allow libcamera pipeline to fully initialize
+            if hq_process.poll() is not None:
+                hq_log.write(
+                    f"[Attempt {attempt + 1}] Crashed on startup (rc={hq_process.returncode})\n"
+                )
+                print(f"[HQ cam] Attempt {attempt + 1} crashed immediately, "
+                      + ("retrying…" if attempt == 0 else "giving up."))
+                hq_process = None
+                if attempt == 0:
+                    time.sleep(3)
+                    continue
+            break  # started successfully (or exhausted retries)
 
         if usb_cmd:
             try:
@@ -144,15 +801,30 @@ def start_recording(mode):
                 usb_log.write(f"Failed to start: {e}\n")
                 print(f"[USB cam] Failed to start: {e}")
 
+        # Arm the watchdog: remember how to respawn each camera into a new segment.
+        _rec_hq_cmd  = hq_cmd
+        _rec_usb_cmd = usb_cmd
+        _rec_hq_out  = hq_out
+        _rec_usb_out = usb_out if usb_cmd else None
+        _rec_log_dir = log_dir
+        _rec_prefix  = prefix
+        _rec_restart = {'hq': 0, 'usb': 0}
+
         state["recording"] = True
         state["mode"] = mode
         state["start_time"] = time.time()
 
 
 def stop_recording():
-    global hq_process, usb_process
+    global hq_process, usb_process, _last_stop_time
+    global _rec_hq_cmd, _rec_usb_cmd
 
     with _lock:
+        # Disarm the watchdog FIRST so it doesn't respawn a camera we're stopping.
+        _rec_hq_cmd = None
+        _rec_usb_cmd = None
+        state["recording"] = False
+
         for proc, name in [(hq_process, "HQ"), (usb_process, "USB")]:
             if proc is not None:
                 try:
@@ -167,9 +839,63 @@ def stop_recording():
 
         hq_process = None
         usb_process = None
-        state["recording"] = False
         state["mode"] = None
         state["start_time"] = None
+    _mission_stop()
+    _last_stop_time = time.time()
+
+
+def _recording_watchdog():
+    """Respawn rpicam-vid / ffmpeg if it dies while we should be recording.
+    Each respawn writes a NEW segment file (…_pN.ext) so already-captured footage
+    is never overwritten. Stops trying after _MAX_REC_RESTART to avoid a storm on
+    a genuinely broken device."""
+    global hq_process, usb_process
+    while True:
+        time.sleep(4)
+        try:
+            with _lock:
+                if not state["recording"]:
+                    continue
+                for key in ("hq", "usb"):
+                    proc = hq_process if key == "hq" else usb_process
+                    cmd  = _rec_hq_cmd if key == "hq" else _rec_usb_cmd
+                    base = _rec_hq_out if key == "hq" else _rec_usb_out
+                    if cmd is None or proc is None:
+                        continue
+                    if proc.poll() is None:
+                        continue                      # still alive
+                    # process died unexpectedly while recording
+                    if _rec_restart[key] >= _MAX_REC_RESTART:
+                        continue
+                    _rec_restart[key] += 1
+                    seg = _rec_restart[key]
+                    newcmd = list(cmd)
+                    # replace the output path with a fresh segment
+                    try:
+                        if key == "hq":
+                            oi = newcmd.index("--output") + 1
+                        else:
+                            oi = len(newcmd) - 1       # ffmpeg output is the last arg
+                        newcmd[oi] = _segment_path(base, seg)
+                    except Exception:
+                        pass
+                    try:
+                        logf = open(_rec_log_dir / f"{_rec_prefix}_{key}_p{seg}.log", "w")
+                        np = subprocess.Popen(newcmd, stdout=logf, stderr=logf)
+                        if key == "hq":
+                            hq_process = np
+                        else:
+                            usb_process = np
+                        print(f"[watchdog] {key.upper()} cam died (rc), respawned segment {seg}: "
+                              f"{newcmd[oi]}")
+                    except Exception as e:
+                        print(f"[watchdog] {key.upper()} respawn failed: {e}")
+        except Exception as e:
+            print(f"[watchdog] loop error: {e}")
+
+
+threading.Thread(target=_recording_watchdog, daemon=True).start()
 
 
 def get_files():
@@ -251,7 +977,9 @@ def api_stop():
 
 @app.route("/stream")
 def stream_view():
-    """MJPEG live stream from Pi HQ cam for focus assist."""
+    """MJPEG live stream for focus assist. ?cam=hq (default) or ?cam=usb."""
+    cam = request.args.get("cam", "hq")
+
     with _lock:
         if state["recording"]:
             return "Cannot stream while recording", 409
@@ -260,25 +988,44 @@ def stream_view():
         state["streaming"] = True
 
     import queue as _queue
-    cmd = [
-        "rpicam-vid",
-        "--codec", "mjpeg",
-        "--output", "-",
-        "--nopreview",
-        "-t", "0",
-        "--width", "1280",
-        "--height", "720",
-        "--framerate", "30",
-        "--awb", "auto",
-        "--exposure", "normal",
-        "--metering", "centre",
-        "--sharpness", "1.5",
-    ]
+
+    if cam == "usb":
+        usb_dev = find_usb_cam()
+        if not usb_dev:
+            with _lock:
+                state["streaming"] = False
+            return "USB webcam not found", 404
+        cmd = [
+            "ffmpeg",
+            "-f", "v4l2",
+            "-input_format", "mjpeg",
+            "-framerate", "15",
+            "-video_size", "1280x720",
+            "-i", usb_dev,
+            "-c:v", "copy",
+            "-f", "mjpeg",
+            "pipe:1",
+        ]
+    else:
+        cmd = [
+            "rpicam-vid",
+            "--codec", "mjpeg",
+            "--output", "-",
+            "--nopreview",
+            "-t", "0",
+            "--width", "1280",
+            "--height", "720",
+            "--framerate", "30",
+            "--awb", "auto",
+            "--exposure", "normal",
+            "--metering", "centre",
+            "--sharpness", "1.5",
+        ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     frame_q = _queue.Queue(maxsize=4)
 
     def _reader():
-        """Background thread: parse JPEG frames from rpicam-vid stdout."""
+        """Background thread: parse JPEG frames from stdout."""
         buf = b""
         try:
             while proc.poll() is None:
@@ -301,7 +1048,7 @@ def stream_view():
             pass
         finally:
             try:
-                frame_q.put(None, timeout=1)   # sentinel — tells generator to stop
+                frame_q.put(None, timeout=1)
             except Exception:
                 pass
 
@@ -311,7 +1058,7 @@ def stream_view():
         try:
             while True:
                 try:
-                    frame = frame_q.get(timeout=5)   # 5s timeout detects dead camera
+                    frame = frame_q.get(timeout=5)
                 except _queue.Empty:
                     break
                 if frame is None:
@@ -321,7 +1068,7 @@ def stream_view():
                     b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
                 )
         except GeneratorExit:
-            pass   # client disconnected
+            pass
         finally:
             try:
                 proc.send_signal(signal.SIGINT)
@@ -354,6 +1101,459 @@ def delete_file(filename):
         abort(404)
     filepath.unlink()
     return jsonify({"ok": True})
+
+
+@app.route("/api/disk")
+def api_disk():
+    usage = shutil.disk_usage(str(CAPTURES_DIR))
+    return jsonify({
+        "total": usage.total,
+        "used": usage.used,
+        "free": usage.free,
+    })
+
+
+@app.route("/api/gps")
+def api_gps():
+    with _gps_lock:
+        d = dict(_gps_state)
+    if d and d.get('ts'):
+        age = time.time() - d.get('ts', 0)
+        d['age_s'] = round(age, 1)
+        d['stale'] = age > 15
+        return jsonify(d)
+    # Fallback: read fix file directly
+    try:
+        if _GPS_FIX_FILE.exists():
+            fd = _json.loads(_GPS_FIX_FILE.read_text())
+            age = time.time() - fd.get('ts', 0)
+            fd['age_s'] = round(age, 1)
+            fd['stale'] = age > 15
+            return jsonify(fd)
+    except Exception:
+        pass
+    return jsonify({'fix': 0, 'stale': True, 'source': 'none'})
+
+
+@app.route("/api/temperature")
+def api_temperature():
+    with _lock:
+        hist = list(_temp_history)
+    current = hist[-1]["c"] if hist else None
+    sensor_present = bool(glob.glob("/sys/bus/w1/devices/28-*"))
+    return jsonify({
+        "current": current,
+        "sensor_found": sensor_present,
+        "history": hist,
+    })
+
+
+@app.route("/api/mission")
+def api_mission():
+    with _mission_lock:
+        m = dict(_mission)
+    return jsonify({
+        'active':   m['active'],
+        'path':     str(m['path']) if m['path'] else None,
+        'count':    m['count'],
+        'elapsed':  round(time.time() - m['start_t'], 0) if m['active'] else 0,
+    })
+
+
+@app.route("/api/mission/start", methods=["POST"])
+def api_mission_start_route():
+    with _mission_lock:
+        if _mission['active']:
+            return jsonify({'error': 'Already logging'}), 400
+    tag = (request.json or {}).get('tag', 'manual')
+    _mission_start(tag)
+    with _mission_lock:
+        p = str(_mission['path'])
+    return jsonify({'ok': True, 'path': p})
+
+
+@app.route("/api/mission/stop", methods=["POST"])
+def api_mission_stop_route():
+    with _mission_lock:
+        if not _mission['active']:
+            return jsonify({'error': 'Not logging'}), 400
+    _mission_stop()
+    with _mission_lock:
+        cnt = _mission['count']
+    return jsonify({'ok': True, 'count': cnt})
+
+
+@app.route("/api/flight")
+def api_flight():
+    with _flight_lock:
+        fs = {k: v for k, v in _flight_state.items() if not k.startswith('_')}
+    return jsonify(fs)
+
+
+@app.route("/api/heater", methods=["GET"])
+def api_heater_get():
+    with _heater_lock:
+        h = dict(_heater)
+    tuner = h.get('_tuner')
+    return jsonify({
+        'enabled':           h['enabled'],
+        'duty':              round(h['duty'], 1),
+        'setpoint':          h['setpoint'],
+        'temp':              h['temp'],
+        'kp':                h['kp'],
+        'ki':                h['ki'],
+        'kd':                h['kd'],
+        'autotuning':        h['autotuning'],
+        'autotune_crosses':  tuner.crosses if tuner else 0,
+        'last_tune':         h['last_tune'],
+        'used_mah':          round(h.get('used_mah', 0.0), 1),
+        'current_a':         round((h['duty'] / 100.0) * _HEATER_MAX_A, 2),
+        'max_a':             _HEATER_MAX_A,
+    })
+
+
+@app.route("/api/heater", methods=["POST"])
+def api_heater_post():
+    data = request.json or {}
+    with _heater_lock:
+        if 'enabled' in data:
+            _heater['enabled'] = bool(data['enabled'])
+            if not _heater['enabled']:
+                _heater['_integral'] = 0.0
+        if 'setpoint' in data:
+            _heater['setpoint'] = max(-20.0, min(40.0, float(data['setpoint'])))
+        for k in ('kp', 'ki', 'kd'):
+            if k in data:
+                _heater[k] = max(0.0, float(data[k]))
+        if data.get('autotune_start'):
+            _heater['autotuning'] = True
+            _heater['_tuner']     = None
+            _heater['enabled']    = True
+        if data.get('autotune_stop'):
+            _heater['autotuning'] = False
+            _heater['_tuner']     = None
+        if data.get('reset_mah'):
+            _heater['used_mah'] = 0.0          # zero the charge counter (pre-flight)
+    _heater_save_settings()
+    return jsonify({'ok': True})
+
+
+# ── Environmental sensor suite (AHT21 / ENS160 / Plantower / DS18B20×2) ───────
+# Ported from the Arduino logger. A background poller logs every curve to a
+# structured CSV; we merge the GPS / heater / flight curves in here too so the
+# single downloadable file holds *all* of our curves.
+from collections import OrderedDict as _OD
+import sensors as _sensors
+
+
+def _sensor_extra_fields():
+    """Extra CSV columns merged into every sensor row (all in one structured file)."""
+    e = _OD()
+    with _gps_lock:
+        g = dict(_gps_state)
+    e['GPS_lat']   = g.get('lat', '')
+    e['GPS_lon']   = g.get('lon', '')
+    e['GPS_alt']   = g.get('alt', '')
+    e['GPS_sats']  = g.get('sats', '')
+    e['GPS_fix']   = g.get('fix', '')
+    e['GPS_speed'] = g.get('speed', '')
+    with _heater_lock:
+        h = dict(_heater)
+    e['Heat_duty'] = round(h.get('duty', 0.0), 1)
+    e['Heat_set']  = h.get('setpoint', '')
+    e['Heat_A']    = round((h.get('duty', 0.0) / 100.0) * _HEATER_MAX_A, 2)
+    e['Heat_mAh']  = round(h.get('used_mah', 0.0), 1)
+    e['CellT']     = h.get('temp', '')
+    with _flight_lock:
+        fs = dict(_flight_state)
+    e['Flight']    = fs.get('state', '')
+    return e
+
+
+_sensors.set_extra_provider(_sensor_extra_fields)
+_sensors.start()
+
+
+@app.route("/api/sensors")
+def api_sensors():
+    latest, hist = _sensors.snapshot()
+    return jsonify({"latest": latest, "history": hist,
+                    "intervals": _sensors.get_intervals()})
+
+
+@app.route("/api/sensors/config", methods=["GET", "POST"])
+def api_sensors_config():
+    """GET current per-sensor poll/log intervals; POST {sensor: seconds, ...}."""
+    if request.method == "POST":
+        updates = request.json or {}
+        return jsonify({"ok": True, "intervals": _sensors.set_intervals(updates)})
+    return jsonify({"intervals": _sensors.get_intervals(),
+                    "defaults": _sensors.DEFAULT_INTERVALS,
+                    "min_s": _sensors._MIN_INTERVAL})
+
+
+@app.route("/download/sensors.csv")
+def download_sensors_csv():
+    p = _sensors.csv_path()
+    if not p.exists():
+        abort(404)
+    return send_from_directory(p.parent, p.name, as_attachment=True,
+                               download_name="stratopi_sensors.csv")
+
+
+@app.route("/api/sensors/reset", methods=["POST"])
+def api_sensors_reset():
+    return jsonify({"ok": _sensors.reset_log()})
+
+
+# ── LoRa diagnostic / economy config (read by lora_tx.py) ─────────────────────
+
+_LORA_DIAG_FILE = Path("/home/louis/stratopi/lora_diag.json")
+_LORA_DIAG_DEFAULT = {
+    "economy_mode": True,
+    "tx_interval_economy": 55,
+    "tx_interval_normal": 35,
+    "milestones_m": [1000, 5000, 10000, 20000, 30000],
+    "triggered_m": [],
+    "lean_packets": True,
+}
+
+
+def _load_lora_diag():
+    try:
+        if _LORA_DIAG_FILE.exists():
+            return {**_LORA_DIAG_DEFAULT, **_json.loads(_LORA_DIAG_FILE.read_text())}
+    except Exception:
+        pass
+    return dict(_LORA_DIAG_DEFAULT)
+
+
+def _save_lora_diag(cfg):
+    _LORA_DIAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _LORA_DIAG_FILE.write_text(_json.dumps(cfg, indent=2))
+
+
+@app.route("/api/lora/diag", methods=["GET"])
+def api_lora_diag_get():
+    return jsonify(_load_lora_diag())
+
+
+@app.route("/api/lora/diag", methods=["POST"])
+def api_lora_diag_post():
+    patch = request.get_json(force=True, silent=True) or {}
+    cfg = _load_lora_diag()
+    preserve = cfg.get("triggered_m", [])
+    cfg.update(patch)
+    if "triggered_m" not in patch:
+        cfg["triggered_m"] = preserve
+    if "milestones_m" in patch:
+        cfg["milestones_m"] = sorted({int(m) for m in cfg["milestones_m"]})
+    _save_lora_diag(cfg)
+    return jsonify(cfg)
+
+
+@app.route("/api/lora/diag/reset", methods=["POST"])
+def api_lora_diag_reset():
+    cfg = _load_lora_diag()
+    cfg["triggered_m"] = []
+    _save_lora_diag(cfg)
+    return jsonify(cfg)
+
+
+_LORA_RADIO_FILE = Path("/home/louis/stratopi/lora_radio.json")
+_LORA_RADIO_DEFAULT = {
+    "tx_power_dbm": 10,
+    "channel": 24,
+    "air_rate": 3,
+    "freq_hz": 434105000,
+    "boost_once_pending": False,
+    "boost_once_dbm": 22,
+}
+
+try:
+    from e22_regs import TX_POWER_DBM, DEFAULT_TX_DBM, erp_mw
+except ImportError:
+    TX_POWER_DBM = (22, 17, 13, 10)
+    DEFAULT_TX_DBM = 10
+    def erp_mw(dbm):
+        return round(10 ** (dbm / 10.0), 2)
+
+
+def _load_lora_radio():
+    try:
+        if _LORA_RADIO_FILE.exists():
+            d = {**_LORA_RADIO_DEFAULT, **_json.loads(_LORA_RADIO_FILE.read_text())}
+            d["tx_power_dbm"] = int(d["tx_power_dbm"])
+            d["channel"] = int(d.get("channel", 24))
+            d["air_rate"] = int(d.get("air_rate", 3))
+            d["freq_hz"] = int(d.get("freq_hz", 434105000))
+            return d
+    except Exception:
+        pass
+    return dict(_LORA_RADIO_DEFAULT)
+
+
+def _save_lora_radio(cfg):
+    _LORA_RADIO_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _LORA_RADIO_FILE.write_text(_json.dumps(cfg, indent=2))
+
+
+@app.route("/api/lora/radio", methods=["GET"])
+def api_lora_radio_get():
+    cfg = _load_lora_radio()
+    dbm = cfg["tx_power_dbm"]
+    return jsonify({
+        **cfg,
+        "erp_mw": erp_mw(dbm),
+        "legal_de_limit_dbm": 10,
+        "options_dbm": list(TX_POWER_DBM),
+    })
+
+
+@app.route("/api/lora/radio", methods=["POST"])
+def api_lora_radio_post():
+    patch = request.get_json(force=True, silent=True) or {}
+    cfg = _load_lora_radio()
+    if "tx_power_dbm" in patch:
+        dbm = int(patch["tx_power_dbm"])
+        if dbm not in TX_POWER_DBM:
+            return jsonify({"error": f"tx_power_dbm must be one of {list(TX_POWER_DBM)}"}), 400
+        cfg["tx_power_dbm"] = dbm
+    if "channel" in patch:
+        cfg["channel"] = int(patch["channel"])
+    if "air_rate" in patch:
+        cfg["air_rate"] = int(patch["air_rate"])
+    if "freq_hz" in patch:
+        cfg["freq_hz"] = int(patch["freq_hz"])
+    _save_lora_radio(cfg)
+    dbm = cfg["tx_power_dbm"]
+    return jsonify({
+        **cfg,
+        "erp_mw": erp_mw(dbm),
+        "legal_de_limit_dbm": 10,
+        "options_dbm": list(TX_POWER_DBM),
+    })
+
+
+_LORA_CRYPTO_FILE = Path("/home/louis/stratopi/lora_crypto.json")
+
+try:
+    from lora_crypto import (
+        crypto_status,
+        key_fingerprint,
+        load_crypto_config,
+        parse_key_hex,
+        save_crypto_config,
+    )
+except ImportError:
+    def load_crypto_config(path):
+        return {"enabled": False, "key_hex": ""}
+    def save_crypto_config(path, cfg):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(cfg, indent=2))
+    def crypto_status(cfg):
+        return {"enabled": bool(cfg.get("enabled"))}
+    def key_fingerprint(key_hex):
+        return None
+    def parse_key_hex(key_hex):
+        raise ValueError("lora_crypto not installed")
+
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    return jsonify({"ok": True, "service": "stratopi"})
+
+
+@app.route("/api/network", methods=["GET"])
+def api_pi_network():
+    """URLs clients can use to reach this Pi on LAN or hotspot."""
+    import socket as _socket
+    ips = []
+    try:
+        for info in _socket.getaddrinfo(_socket.gethostname(), None, _socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip not in ips:
+            ips.append(ip)
+    except OSError:
+        pass
+    urls = ["http://stratopi.local:8080", "http://stratopi:8080"]
+    for ip in ips:
+        urls.append(f"http://{ip}:8080")
+    if "http://192.168.4.1:8080" not in urls:
+        urls.append("http://192.168.4.1:8080")
+    seen = set()
+    unique = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            unique.append(u)
+    return jsonify({
+        "ok": True,
+        "hostname": "stratopi",
+        "ips": ips,
+        "urls": unique,
+    })
+
+
+@app.route("/api/lora/crypto", methods=["GET"])
+def api_lora_crypto_get():
+    cfg = load_crypto_config(_LORA_CRYPTO_FILE)
+    st = crypto_status(cfg)
+    return jsonify({
+        "ok": True,
+        **st,
+        "key_fingerprint": key_fingerprint(cfg.get("key_hex", "")),
+    })
+
+
+@app.route("/api/lora/crypto", methods=["POST"])
+def api_lora_crypto_post():
+    """Ground station pushes encryption key + enabled flag over Wi‑Fi."""
+    patch = request.get_json(force=True, silent=True) or {}
+    cfg = load_crypto_config(_LORA_CRYPTO_FILE)
+    if "enabled" in patch:
+        cfg["enabled"] = bool(patch["enabled"])
+    if "key_hex" in patch:
+        kh = str(patch["key_hex"]).strip()
+        if kh:
+            parse_key_hex(kh)
+            cfg["key_hex"] = kh
+    save_crypto_config(_LORA_CRYPTO_FILE, cfg)
+    st = crypto_status(cfg)
+    return jsonify({
+        "ok": True,
+        "message": "LoRa crypto config updated",
+        **st,
+        "key_fingerprint": key_fingerprint(cfg.get("key_hex", "")),
+    })
+
+
+@app.route("/api/lora/radio/boost-once", methods=["POST"])
+def api_lora_radio_boost_once():
+    """Queue one TX at max (or chosen) power — triggered from ground control."""
+    patch = request.get_json(force=True, silent=True) or {}
+    cfg = _load_lora_radio()
+    boost_dbm = int(patch.get("boost_once_dbm", 22))
+    if boost_dbm not in TX_POWER_DBM:
+        return jsonify({"error": f"boost_once_dbm must be one of {list(TX_POWER_DBM)}"}), 400
+    cfg["boost_once_pending"] = True
+    cfg["boost_once_dbm"] = boost_dbm
+    _save_lora_radio(cfg)
+    return jsonify({
+        "ok": True,
+        "message": f"Next LoRa TX will run at {boost_dbm} dBm once, then revert to {cfg['tx_power_dbm']} dBm",
+        **cfg,
+        "erp_mw_boost": erp_mw(boost_dbm),
+    })
 
 
 if __name__ == "__main__":

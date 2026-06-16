@@ -61,6 +61,17 @@
   .stream-note{font-size:.78rem;color:#8b949e;margin-top:8px}
   optgroup{color:#484f58;font-size:.8rem}
   option{color:#e6edf3}
+  /* ── temperature card ── */
+  .temp-num{font-size:2.4rem;font-weight:700;line-height:1}
+  .tc-ok{color:#3fb950}.tc-warm{color:#f0883e}.tc-hot{color:#f85149}.tc-none{color:#484f58}
+  #temp-graph{display:block;border-radius:4px;width:100%;height:60px}
+  /* GPS card */
+  .gps-fix-ok{color:#3fb950}.gps-fix-warn{color:#f0883e}.gps-fix-none{color:#484f58}
+  .gps-coord{font-family:monospace;font-size:1.2rem;font-weight:700;color:#58a6ff;line-height:1.4}
+  .gps-alt{font-size:1.5rem;font-weight:700;color:#e6edf3}
+  /* heater / flight */
+  .flight-ground{color:#8b949e}.flight-ascending{color:#3fb950}.flight-descending{color:#f0883e}.flight-landed{color:#58a6ff}
+  .ht-enabled{color:#f0883e}.ht-tuning{color:#c8e44a}
   @media(max-width:640px){.grid{grid-template-columns:1fr}.card.full{grid-column:1}}
 </style>
 </head>
@@ -108,7 +119,7 @@
   <div class="card">
     <h2>Pi HQ Camera (IMX477)</h2>
     <label>Mode (resolution × max fps)</label>
-    <select id="hq-mode" onchange="applyHqMode()" >
+    <select id="hq-mode" onchange="applyHqMode()">
       <optgroup label="H264 — hardware encoded, .h264 output">
         <option value="1332,990,120">1332×990 · up to 120 fps · cropped sensor</option>
         <option value="1920,1080,60" selected>1920×1080 · up to 60 fps · 16:9 ★ recommended</option>
@@ -121,7 +132,7 @@
       </optgroup>
     </select>
     <label>FPS <span id="hq-fps-hint" style="color:#f0883e;font-size:.78rem"></span></label>
-    <input type="number" id="hq-fps" value="30" min="1" max="120" step="1">
+    <input type="number" id="hq-fps" value="30" min="1" max="120" step="1" oninput="updateStorageEstimate()">
     <input type="hidden" id="hq-width" value="1920">
     <input type="hidden" id="hq-height" value="1080">
     <button class="btn-save" onclick="saveSettings()">Save Settings</button>
@@ -130,12 +141,21 @@
   <!-- USB Cam Settings -->
   <div class="card">
     <h2>USB Webcam</h2>
-    <label>Width (px)</label>
-    <input type="number" id="usb-width" value="1920" min="320" max="3264" step="2">
-    <label>Height (px)</label>
-    <input type="number" id="usb-height" value="1080" min="240" max="2448" step="2">
-    <label>FPS</label>
-    <input type="number" id="usb-fps" value="24" min="1" max="30" step="1">
+    <label>Resolution × FPS (MJPEG — hardware confirmed)</label>
+    <select id="usb-mode" onchange="applyUsbMode()">
+      <option value="3264,2448,15">3264×2448 · 15 fps · 8 MP</option>
+      <option value="2592,1944,15">2592×1944 · 15 fps · 5 MP</option>
+      <option value="2048,1536,15">2048×1536 · 15 fps · 3.1 MP 4:3</option>
+      <option value="1920,1080,25" selected>1920×1080 · 25 fps · 1080p ★</option>
+      <option value="1600,1200,15">1600×1200 · 15 fps</option>
+      <option value="1280,960,15">1280×960 · 15 fps</option>
+      <option value="1280,720,25">1280×720 · 25 fps · 720p</option>
+      <option value="800,600,15">800×600 · 15 fps</option>
+      <option value="640,480,15">640×480 · 15 fps</option>
+    </select>
+    <input type="hidden" id="usb-width" value="1920">
+    <input type="hidden" id="usb-height" value="1080">
+    <input type="hidden" id="usb-fps" value="25">
     <div style="margin-top:14px;display:flex;align-items:flex-start;gap:10px">
       <input type="checkbox" id="usb-prioritize-fps" checked style="margin-top:3px;width:auto;accent-color:#58a6ff;cursor:pointer">
       <div>
@@ -146,18 +166,211 @@
         </p>
       </div>
     </div>
-    <div style="height:18px"></div>
+    <button class="btn-save" onclick="saveSettings()">Save Settings</button>
+  </div>
+
+
+  <!-- Temperature -->
+  <div class="card">
+    <h2>Cell Temperature</h2>
+    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+      <div style="min-width:90px">
+        <div class="temp-num tc-none" id="temp-value">--</div>
+        <div style="color:#8b949e;font-size:.75rem;margin-top:5px" id="temp-label">DS18B20 on GPIO4</div>
+      </div>
+      <svg id="temp-graph" viewBox="0 0 400 56" preserveAspectRatio="none" style="flex:1;min-width:120px">
+        <rect width="400" height="56" fill="#0d1117" rx="3"/>
+        <text x="200" y="32" fill="#30363d" font-size="11" text-anchor="middle" font-family="sans-serif">no data yet</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Heater Control -->
+  <div class="card">
+    <h2>Heater Control — IRFZ44N GPIO18</h2>
+    <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:4px">CELL TEMP</div>
+        <div id="ht-temp" style="font-size:1.9rem;font-weight:700;color:#e6edf3">--</div>
+      </div>
+      <div style="flex:1;min-width:120px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">HEAT POWER</div>
+        <div style="background:#21262d;border-radius:4px;height:10px;overflow:hidden">
+          <div id="ht-bar" style="background:#f0883e;height:100%;width:0%;transition:width .6s"></div>
+        </div>
+        <div id="ht-duty" style="font-size:.82rem;color:#f0883e;margin-top:4px">0%</div>
+      </div>
+      <div>
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:4px">STATUS</div>
+        <div id="ht-status" style="font-size:.88rem;font-weight:600;color:#484f58">Disabled</div>
+      </div>
+      <div style="min-width:130px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:4px">CURRENT / CHARGE</div>
+        <div id="ht-current" style="font-size:.88rem;color:#8b949e">0.00 A</div>
+        <div id="ht-mah" style="font-size:.95rem;font-weight:600;color:#f0883e">0.0 mAh</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px;align-items:flex-end;flex-wrap:wrap">
+      <div>
+        <label>Min Cell Temp (°C)</label>
+        <input type="number" id="ht-setpoint" value="10" min="-20" max="40" step="0.5" style="width:75px">
+      </div>
+      <div>
+        <label>Kp</label>
+        <input type="number" id="ht-kp" value="10.0" min="0" step="0.1" style="width:68px">
+      </div>
+      <div>
+        <label>Ki</label>
+        <input type="number" id="ht-ki" value="0.05" min="0" step="0.001" style="width:68px">
+      </div>
+      <div>
+        <label>Kd</label>
+        <input type="number" id="ht-kd" value="2.0" min="0" step="0.1" style="width:68px">
+      </div>
+    </div>
+    <div class="btn-group" style="margin-top:14px">
+      <button id="ht-toggle" class="btn-start" onclick="heaterToggle()">Enable Heater</button>
+      <button class="btn-save" onclick="heaterApply()" style="margin-top:0;width:auto">Apply</button>
+      <button id="ht-autotune-btn" class="btn-stream" onclick="heaterAutoTune()" style="margin-top:0">Auto-Tune PID</button>
+      <button class="btn-stream" onclick="heaterResetMah()" style="margin-top:0">Reset mAh</button>
+    </div>
+    <div id="ht-autotune-bar" style="display:none;margin-top:8px;padding:7px 10px;background:#1a2000;border:1px solid #4a6a00;border-radius:6px;font-size:.78rem;color:#c8e44a">
+      Relay auto-tuning… <span id="ht-at-crosses">0</span>/4 crossings &nbsp;·&nbsp; keep ambient near setpoint &nbsp;·&nbsp; may take 10–30 min
+    </div>
+    <div id="ht-last-tune" style="display:none;margin-top:6px;font-size:.75rem;color:#3fb950"></div>
+  </div>
+
+
+  <!-- LoRa TX power -->
+  <div class="card full">
+    <h2>LoRa TX Power — SX1268 HAT</h2>
+    <p style="font-size:.78rem;color:#8b949e;margin-bottom:10px">
+      Default <b>10 dBm (~10 mW)</b> for Germany ISM. Higher values increase range but may exceed legal ERP.
+    </p>
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <label style="font-size:.85rem;color:#8b949e">Output power</label>
+      <select id="lora-power" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 10px">
+        <option value="10">10 dBm — 10 mW (legal default)</option>
+        <option value="13">13 dBm — 20 mW</option>
+        <option value="17">17 dBm — 50 mW</option>
+        <option value="22">22 dBm — 160 mW (max)</option>
+      </select>
+      <button class="btn-save" onclick="loraPowerApply()" style="margin-top:0;width:auto">Apply</button>
+      <span id="lora-power-status" style="font-size:.78rem;color:#484f58"></span>
+    </div>
+    <div id="lora-power-warn" style="display:none;margin-top:8px;font-size:.75rem;color:#f0883e"></div>
+  </div>
+
+  <!-- GPS -->
+  <div class="card full">
+    <h2>GPS Position — Matek SAM-M10Q</h2>
+    <div style="display:flex;align-items:flex-start;gap:28px;flex-wrap:wrap">
+      <div style="min-width:100px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">FIX</div>
+        <div id="gps-fix" class="gps-fix-none" style="font-size:.95rem;font-weight:600">&#9679; No data</div>
+        <div style="font-size:.73rem;color:#484f58;margin-top:8px">SATS / HDOP</div>
+        <div id="gps-sats" style="color:#8b949e;font-size:.9rem">--</div>
+      </div>
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">LATITUDE / LONGITUDE</div>
+        <div class="gps-coord" id="gps-lat">--</div>
+        <div class="gps-coord" id="gps-lon">--</div>
+      </div>
+      <div style="min-width:100px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">ALTITUDE</div>
+        <div class="gps-alt" id="gps-alt">--</div>
+      </div>
+      <div style="min-width:100px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">FLIGHT STATE</div>
+        <div id="flight-state-badge" style="font-size:.88rem;font-weight:600;color:#8b949e">Ground</div>
+        <div style="font-size:.73rem;color:#484f58;margin-top:8px">LAUNCH ALT</div>
+        <div id="flight-launch-alt" style="color:#8b949e;font-size:.82rem">-- m</div>
+      </div>
+      <div style="min-width:120px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">SPEED / HDG</div>
+        <div id="gps-spd" style="color:#8b949e;font-size:.9rem">--</div>
+        <div style="font-size:.73rem;color:#484f58;margin-top:8px">UTC TIME</div>
+        <div id="gps-time" style="color:#8b949e;font-size:.9rem;font-family:monospace">--</div>
+      </div>
+    </div>
+    <div id="gps-status-bar" style="margin-top:10px;font-size:.75rem;color:#484f58">
+      LoRa service not running — start stratopi_lora.service to enable GPS
+    </div>
+    <div id="mission-log-bar" style="margin-top:4px;font-size:.75rem;color:#484f58">
+      GPS logging: inactive
+    </div>
+  </div>
+
+  <!-- Environmental Sensors -->
+  <div class="card full">
+    <h2>
+      Environmental Sensors
+      <span id="sensors-age" style="font-size:.72rem;color:#484f58;font-weight:400;margin-left:8px"></span>
+    </h2>
+    <div style="display:flex;align-items:flex-start;gap:28px;flex-wrap:wrap">
+      <div style="min-width:120px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">AHT21 — TEMP / RH</div>
+        <div id="s-aht-t" class="gps-coord">--</div>
+        <div id="s-aht-rh" class="gps-coord">--</div>
+      </div>
+      <div style="min-width:150px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">ENS160 — AIR QUALITY</div>
+        <div id="s-aqi" style="color:#8b949e;font-size:.9rem">AQI --</div>
+        <div id="s-tvoc" style="color:#8b949e;font-size:.9rem">TVOC -- ppb</div>
+        <div id="s-eco2" style="color:#8b949e;font-size:.9rem">eCO₂ -- ppm</div>
+      </div>
+      <div style="min-width:150px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">PLANTOWER — PARTICULATES</div>
+        <div id="s-pm1"  style="color:#8b949e;font-size:.9rem">PM1.0 -- µg/m³</div>
+        <div id="s-pm25" style="color:#8b949e;font-size:.9rem">PM2.5 -- µg/m³</div>
+        <div id="s-pm10" style="color:#8b949e;font-size:.9rem">PM10 -- µg/m³</div>
+      </div>
+      <div style="min-width:140px">
+        <div style="font-size:.73rem;color:#484f58;margin-bottom:5px">DS18B20 PROBES</div>
+        <div id="s-ds-cell" style="color:#8b949e;font-size:.9rem">Cell --</div>
+        <div id="s-ds-env1" style="color:#8b949e;font-size:.9rem">Env1 --</div>
+        <div id="s-ds-env2" style="color:#8b949e;font-size:.9rem">Env2 --</div>
+      </div>
+    </div>
+
+    <!-- per-sensor polling frequencies -->
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid #21262d">
+      <div style="font-size:.73rem;color:#484f58;margin-bottom:6px">POLL / LOG FREQUENCY (seconds)</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+        <label style="font-size:.78rem;color:#8b949e">AHT21<br><input type="number" id="iv-aht21" min="1" step="1" style="width:62px"></label>
+        <label style="font-size:.78rem;color:#8b949e">ENS160<br><input type="number" id="iv-ens160" min="1" step="1" style="width:62px"></label>
+        <label style="font-size:.78rem;color:#8b949e">Plantower<br><input type="number" id="iv-plantower" min="1" step="1" style="width:62px"></label>
+        <label style="font-size:.78rem;color:#8b949e">DS18B20<br><input type="number" id="iv-ds18b20" min="1" step="1" style="width:62px"></label>
+        <label style="font-size:.78rem;color:#8b949e">CSV log<br><input type="number" id="iv-csv" min="1" step="1" style="width:62px"></label>
+        <button class="btn-save" onclick="applySensorIntervals()" style="width:auto;margin-top:0">Apply</button>
+        <span id="iv-status" style="font-size:.75rem;color:#56d364"></span>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <a href="/download/sensors.csv" class="btn-save" download
+         style="text-decoration:none;display:inline-block;width:auto;margin-top:0">⤓ Download Data Log (CSV)</a>
+      <button class="btn-stream" onclick="resetSensorLog()" style="margin-top:0">Reset Log</button>
+      <span id="sensors-rows" style="font-size:.75rem;color:#484f58"></span>
+    </div>
   </div>
 
   <!-- Live View -->
   <div class="card full">
-    <h2>Live View — Focus Assist (Pi HQ Cam)</h2>
+    <h2>Live View — Focus Assist</h2>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <label style="margin:0;white-space:nowrap;color:#8b949e;font-size:.82rem">Camera:</label>
+      <select id="stream-cam" style="max-width:260px">
+        <option value="hq">Pi HQ Camera (IMX477) — 1280×720 @ 30 fps</option>
+        <option value="usb">USB Webcam — 1280×720 @ 15 fps</option>
+      </select>
+    </div>
     <div class="btn-group">
       <button id="btn-stream-start" class="btn-stream" onclick="startStream()">◉ Start Live View</button>
       <button id="btn-stream-stop" class="btn-stop" onclick="stopStream()" disabled>■ Stop</button>
     </div>
     <p class="stream-note">
-      Streams 1280×720 @ 30 fps MJPEG. Use to check focus before launch — set focus ring to ∞ and confirm horizon sharpness.<br>
+      Use to check focus before launch. HQ cam: set focus ring to ∞ and confirm horizon sharpness.<br>
       Live view and recording are mutually exclusive.
     </p>
     <div id="stream-container" style="display:none;margin-top:14px">
@@ -174,6 +387,7 @@
     <div id="disk-wrap" style="display:none;margin-bottom:14px">
       <div class="disk-bar-wrap"><div class="disk-bar" id="disk-bar"></div></div>
       <div class="disk-text" id="disk-text"></div>
+      <div id="storage-estimate" style="color:#56d364;font-size:.78rem;margin-top:4px"></div>
     </div>
     <table>
       <thead>
@@ -190,6 +404,7 @@
 <script>
   let startTs = null;
   let settingsLoaded = false; // only sync settings from server once — don't overwrite user edits
+  let diskFreeBytes = 0;
 
   function fmtSize(b){
     if(b<1024)return b+' B';
@@ -214,6 +429,7 @@
     if(parseInt(fpsEl.value) > maxFps) fpsEl.value = maxFps;
     fpsEl.max = maxFps;
     document.getElementById('hq-fps-hint').textContent = `(max ${maxFps} for this mode)`;
+    updateStorageEstimate();
   }
   applyHqMode();
 
@@ -224,6 +440,52 @@
       if(ow === w && oh === h){ sel.value = opt.value; break; }
     }
     applyHqMode();
+  }
+
+  // ── USB mode selector ─────────────────────────────────────────────────────
+
+  function applyUsbMode(){
+    const sel = document.getElementById('usb-mode');
+    const [w, h, fps] = sel.value.split(',').map(Number);
+    document.getElementById('usb-width').value = w;
+    document.getElementById('usb-height').value = h;
+    document.getElementById('usb-fps').value = fps;
+    updateStorageEstimate();
+  }
+  applyUsbMode();
+
+  function syncUsbModeSelector(w, h, fps){
+    const sel = document.getElementById('usb-mode');
+    for(const opt of sel.options){
+      const [ow, oh, ofps] = opt.value.split(',').map(Number);
+      if(ow === w && oh === h && ofps === fps){ sel.value = opt.value; break; }
+    }
+    applyUsbMode();
+  }
+
+  // ── Storage estimate ──────────────────────────────────────────────────────
+
+  function updateStorageEstimate(){
+    if(!diskFreeBytes) return;
+    const hqW   = parseInt(document.getElementById('hq-width').value)  || 1920;
+    const hqH   = parseInt(document.getElementById('hq-height').value) || 1080;
+    const hqFps = parseInt(document.getElementById('hq-fps').value)    || 30;
+    const usbW   = parseInt(document.getElementById('usb-width').value)  || 1920;
+    const usbH   = parseInt(document.getElementById('usb-height').value) || 1080;
+    const usbFps = parseInt(document.getElementById('usb-fps').value)    || 25;
+    // HQ cam: H264 ~0.625 MB/s at 1080p30; MJPEG ~8× larger per pixel·fps
+    const isH264 = hqW <= 1920 && hqH <= 1080;
+    const hqMbps = isH264
+      ? 0.625 * (hqFps / 30) * (hqW * hqH) / (1920 * 1080)
+      : 5.0   * (hqFps / 20) * (hqW * hqH) / (1920 * 1080);
+    // USB cam measured: ~0.82 MB/s at 1920×1080×25 fps MJPEG
+    const usbMbps = 0.82 * (usbW * usbH * usbFps) / (1920 * 1080 * 25);
+    const totalMbps = hqMbps + usbMbps;
+    const hours = (diskFreeBytes / (1024 * 1024)) / (totalMbps * 3600);
+    const el = document.getElementById('storage-estimate');
+    if(el) el.textContent =
+      `~${hours.toFixed(1)}h recording remaining at these settings`
+      + ` (HQ ≈${hqMbps.toFixed(1)} + USB ≈${usbMbps.toFixed(1)} MB/s)`;
   }
 
   // ── Status polling ────────────────────────────────────────────────────────
@@ -275,9 +537,7 @@
         const s = d.settings;
         syncHqModeSelector(s.hq_cam.width, s.hq_cam.height);
         document.getElementById('hq-fps').value = s.hq_cam.fps;
-        document.getElementById('usb-width').value = s.usb_cam.width;
-        document.getElementById('usb-height').value = s.usb_cam.height;
-        document.getElementById('usb-fps').value = s.usb_cam.fps;
+        syncUsbModeSelector(s.usb_cam.width, s.usb_cam.height, s.usb_cam.fps);
         document.getElementById('usb-prioritize-fps').checked = s.usb_cam.prioritize_fps !== false;
         settingsLoaded = true;
       }
@@ -342,13 +602,14 @@
     document.getElementById('btn-start-test').disabled=true;
     document.getElementById('btn-mission').disabled=true;
     document.getElementById('stream-container').style.display='';
+    const cam = document.getElementById('stream-cam').value;
     // Setting the src opens the streaming connection to the server
-    document.getElementById('stream-img').src = '/stream?' + Date.now();
+    document.getElementById('stream-img').src = '/stream?cam=' + cam + '&t=' + Date.now();
   }
 
   function stopStream(){
     // Clearing the src causes the browser to abort the connection,
-    // which triggers GeneratorExit in the Flask generator → kills rpicam-vid
+    // which triggers GeneratorExit in the Flask generator → kills camera process
     document.getElementById('stream-img').src = '';
     document.getElementById('stream-container').style.display='none';
     document.getElementById('btn-stream-start').disabled=false;
@@ -361,33 +622,38 @@
 
   async function loadFiles(){
     try{
-      const files = await fetch('/api/files').then(r=>r.json());
+      const [files, disk] = await Promise.all([
+        fetch('/api/files').then(r=>r.json()),
+        fetch('/api/disk').then(r=>r.json()).catch(()=>null),
+      ]);
       const tbody = document.getElementById('files-tbody');
       if(!files.length){
         tbody.innerHTML='<tr><td colspan="4" class="no-files">No captures yet</td></tr>';
-        return;
+      } else {
+        tbody.innerHTML=files.map(f=>`
+          <tr>
+            <td style="font-family:monospace;font-size:.82rem">${f.name}</td>
+            <td style="color:#8b949e">${fmtSize(f.size)}</td>
+            <td style="color:#8b949e">${fmtDate(f.modified)}</td>
+            <td>
+              <a class="dl" href="/files/${encodeURIComponent(f.name)}" download="${f.name}">⬇ Download</a>
+              &nbsp;
+              <button class="del-btn" onclick="deleteFile('${f.name.replace(/'/g,"\\'")}')">✕</button>
+            </td>
+          </tr>`).join('');
       }
-      tbody.innerHTML=files.map(f=>`
-        <tr>
-          <td style="font-family:monospace;font-size:.82rem">${f.name}</td>
-          <td style="color:#8b949e">${fmtSize(f.size)}</td>
-          <td style="color:#8b949e">${fmtDate(f.modified)}</td>
-          <td>
-            <a class="dl" href="/files/${encodeURIComponent(f.name)}" download="${f.name}">⬇ Download</a>
-            &nbsp;
-            <button class="del-btn" onclick="deleteFile('${f.name.replace(/'/g,"\\'")}')">✕</button>
-          </td>
-        </tr>`).join('');
-      let total = files.reduce((s,f)=>s+f.size, 0);
-      const capGB = 256, usedGB = total/1073741824;
-      const pct = Math.min(100,(usedGB/capGB)*100);
-      const diskWrap = document.getElementById('disk-wrap');
-      const bar = document.getElementById('disk-bar');
-      const txt = document.getElementById('disk-text');
-      diskWrap.style.display='';
-      bar.style.width = pct.toFixed(1)+'%';
-      bar.style.background = pct>85?'#da3633':pct>60?'#f0883e':'#238636';
-      txt.textContent = `${fmtSize(total)} used of ${capGB} GB (${pct.toFixed(1)}%)`;
+      if(disk){
+        diskFreeBytes = disk.free;
+        const pct = Math.min(100,(disk.used/disk.total)*100);
+        const diskWrap = document.getElementById('disk-wrap');
+        const bar = document.getElementById('disk-bar');
+        const txt = document.getElementById('disk-text');
+        diskWrap.style.display='';
+        bar.style.width = pct.toFixed(1)+'%';
+        bar.style.background = pct>85?'#da3633':pct>60?'#f0883e':'#238636';
+        txt.textContent = `${fmtSize(disk.used)} used of ${fmtSize(disk.total)} — ${fmtSize(disk.free)} free (${pct.toFixed(1)}%)`;
+        updateStorageEstimate();
+      }
     } catch(e){ console.error('Files error:',e) }
   }
 
@@ -396,6 +662,374 @@
     await fetch('/api/delete/'+encodeURIComponent(name),{method:'DELETE'});
     loadFiles();
   }
+
+
+  // ── Temperature ────────────────────────────────────────────────────────────────────
+
+  async function updateTemp() {
+    try {
+      const d = await fetch('/api/temperature').then(r => r.json());
+      const tv = document.getElementById('temp-value');
+      const tl = document.getElementById('temp-label');
+      if (d.current !== null && d.current !== undefined) {
+        const c = d.current;
+        tv.textContent = c.toFixed(1) + '°C';
+        tv.className = 'temp-num ' + (c > 45 || c < -10 ? 'tc-hot' : c > 35 ? 'tc-warm' : 'tc-ok');
+        tl.textContent = 'Li-ion cells · ' + new Date().toLocaleTimeString();
+      } else {
+        tv.textContent = '--';
+        tv.className = 'temp-num tc-none';
+        tl.textContent = d.sensor_found ? 'Sensor found, warming up…' : 'No DS18B20 on GPIO4 — check wiring';
+      }
+      if (d.history && d.history.length > 1) drawTempGraph(d.history.slice(-60));
+    } catch(e) { console.error('Temp:', e); }
+  }
+
+  let _htSetpoint = 10.0;   // updated by updateHeater()
+
+  function drawTempGraph(data, setpoint) {
+    const svg = document.getElementById('temp-graph');
+    if (!data || data.length < 2) return;
+    const inputVal = parseFloat(document.getElementById('ht-setpoint').value);
+    const sp = setpoint != null ? setpoint : (!isNaN(inputVal) ? inputVal : _htSetpoint);
+    const W=400, H=56, px=10, py=7;
+    const vals = data.map(h => h.c);
+    // Include setpoint in y-range so the line is always visible
+    const allVals = [...vals, sp];
+    const lo = Math.min(...allVals)-1, hi = Math.max(...allVals)+1;
+    const rY = hi-lo||1, rX = data.length-1;
+    const tx = i => (px + (i/rX)*(W-2*px)).toFixed(1);
+    const ty = v => (H-py-((v-lo)/rY)*(H-2*py)).toFixed(1);
+    const pts = data.map((h,i) => tx(i)+','+ty(h.c)).join(' ');
+    const lx=tx(data.length-1), ly=ty(vals[vals.length-1]);
+    const last=vals[vals.length-1];
+    const col = last>45||last<-10 ? '#f85149' : last>35 ? '#f0883e' : '#3fb950';
+    const mins = Math.round((Date.now()/1000-data[0].ts)/60);
+    const spY = ty(sp);
+    const minV = Math.min(...vals).toFixed(1), maxV = Math.max(...vals).toFixed(1);
+    svg.innerHTML =
+      '<rect width="'+W+'" height="'+H+'" fill="#0d1117" rx="3"/>'+
+      '<line x1="'+px+'" y1="'+(H-py)+'" x2="'+(W-px)+'" y2="'+(H-py)+'" stroke="#21262d" stroke-width="1"/>'+
+      // Setpoint reference line
+      '<line x1="'+px+'" y1="'+spY+'" x2="'+(W-px)+'" y2="'+spY+'" stroke="#1f3a6e" stroke-width="1" stroke-dasharray="4 3"/>'+
+      '<text x="'+(W-px-2)+'" y="'+(parseFloat(spY)-2)+'" fill="#3a6abf" font-size="8" text-anchor="end" font-family="sans-serif">'+sp.toFixed(1)+'°</text>'+
+      // Temp curve
+      '<polyline points="'+pts+'" fill="none" stroke="'+col+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'+
+      '<circle cx="'+lx+'" cy="'+ly+'" r="3" fill="'+col+'"/>'+
+      // Min/max labels
+      '<text x="'+px+'" y="'+(py+8)+'" fill="#484f58" font-size="8" font-family="sans-serif">max '+maxV+'°</text>'+
+      '<text x="'+px+'" y="'+(H-py-3)+'" fill="#484f58" font-size="8" font-family="sans-serif">min '+minV+'°</text>'+
+      '<text x="'+px+'" y="'+(H-2)+'" fill="#484f58" font-size="8" font-family="monospace">'+lo.toFixed(0)+'°</text>'+
+      '<text x="'+px+'" y="10" fill="#484f58" font-size="8" font-family="monospace">'+hi.toFixed(0)+'°</text>'+
+      '<text x="200" y="'+(H-2)+'" fill="#484f58" font-size="8" text-anchor="middle" font-family="sans-serif">last '+mins+' min</text>'+
+      '<text x="'+(W-px)+'" y="10" fill="'+col+'" font-size="9" text-anchor="end" font-family="monospace" font-weight="bold">'+last.toFixed(1)+'°</text>';
+  }
+
+  updateTemp();
+  setInterval(updateTemp, 5000);
+
+
+
+  // ── Heater / Flight / Mission ──────────────────────────────────────────────
+
+  let _htEnabled = false;
+  let _htAutotuning = false;
+  let _htSetpointInitialized = false;
+
+  async function updateHeater() {
+    try {
+      const h = await fetch('/api/heater').then(r => r.json());
+      _htEnabled    = h.enabled;
+      _htAutotuning = h.autotuning;
+
+      // temp
+      const tempEl = document.getElementById('ht-temp');
+      if (h.temp != null) {
+        tempEl.textContent = h.temp.toFixed(1) + ' °C';
+        tempEl.style.color = h.temp < h.setpoint - 1 ? '#f0883e' : (h.temp < h.setpoint + 1 ? '#3fb950' : '#e6edf3');
+      } else { tempEl.textContent = '--'; }
+
+      // power bar
+      document.getElementById('ht-bar').style.width = h.duty + '%';
+      document.getElementById('ht-duty').textContent = h.duty.toFixed(1) + '%';
+
+      // current draw + cumulative charge (mAh)
+      if (h.current_a != null) document.getElementById('ht-current').textContent =
+        h.current_a.toFixed(2) + ' A' + (h.max_a ? ' / ' + h.max_a + ' A max' : '');
+      if (h.used_mah != null) document.getElementById('ht-mah').textContent =
+        h.used_mah.toFixed(1) + ' mAh';
+
+      // status text
+      const stEl = document.getElementById('ht-status');
+      if (h.autotuning) {
+        stEl.textContent = 'Auto-tuning…'; stEl.className = 'ht-tuning';
+      } else if (h.enabled) {
+        const sp = h.setpoint, t = h.temp;
+        stEl.textContent = t != null ? (t >= sp ? 'Warm ✓' : 'Heating') : 'Enabled';
+        stEl.className = 'ht-enabled';
+      } else {
+        stEl.textContent = 'Disabled'; stEl.className = '';
+        stEl.style.color = '#484f58';
+      }
+
+      // toggle button
+      const tog = document.getElementById('ht-toggle');
+      if (h.enabled) {
+        tog.textContent = 'Disable Heater'; tog.className = 'btn-stop';
+      } else {
+        tog.textContent = 'Enable Heater'; tog.className = 'btn-start';
+      }
+
+      // autotune bar
+      const atBar = document.getElementById('ht-autotune-bar');
+      const atBtn = document.getElementById('ht-autotune-btn');
+      if (h.autotuning) {
+        atBar.style.display = '';
+        document.getElementById('ht-at-crosses').textContent = h.autotune_crosses;
+        atBtn.textContent = 'Stop Autotune'; atBtn.className = 'btn-stop';
+      } else {
+        atBar.style.display = 'none';
+        atBtn.textContent = 'Auto-Tune PID'; atBtn.className = 'btn-stream';
+      }
+
+      // Load setpoint from server once on first poll; the user owns the field after that.
+      _htSetpoint = h.setpoint;
+      const spEl = document.getElementById('ht-setpoint');
+      if (!_htSetpointInitialized) {
+        spEl.value = h.setpoint;
+        _htSetpointInitialized = true;   // always mark done — never overwrite again
+      }
+      if (!h.autotuning) {
+        const kpEl = document.getElementById('ht-kp');
+        const kiEl = document.getElementById('ht-ki');
+        const kdEl = document.getElementById('ht-kd');
+        if (Math.abs(parseFloat(kpEl.value) - h.kp) > 0.01) kpEl.value = h.kp;
+        if (Math.abs(parseFloat(kiEl.value) - h.ki) > 0.0001) kiEl.value = h.ki;
+        if (Math.abs(parseFloat(kdEl.value) - h.kd) > 0.01) kdEl.value = h.kd;
+      }
+
+      // last tune result
+      const ltEl = document.getElementById('ht-last-tune');
+      if (h.last_tune) {
+        ltEl.style.display = '';
+        const lt = h.last_tune;
+        ltEl.textContent = `✓ Auto-tune result: Kp=${lt.kp} Ki=${lt.ki} Kd=${lt.kd} (Ku=${lt.Ku} Pu=${lt.Pu_s}s amp=±${lt.amplitude}°C)`;
+      }
+    } catch(e) { console.warn('heater:', e); }
+  }
+
+  async function heaterToggle() {
+    await fetch('/api/heater', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled: !_htEnabled})});
+    updateHeater();
+  }
+
+  async function heaterResetMah() {
+    if (!confirm('Reset the heater mAh counter to 0?')) return;
+    await fetch('/api/heater', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({reset_mah: true})});
+    updateHeater();
+  }
+
+  async function heaterApply() {
+    const sp = parseFloat(document.getElementById('ht-setpoint').value);
+    const kp = parseFloat(document.getElementById('ht-kp').value);
+    const ki = parseFloat(document.getElementById('ht-ki').value);
+    const kd = parseFloat(document.getElementById('ht-kd').value);
+    if (isNaN(sp)||isNaN(kp)||isNaN(ki)||isNaN(kd)) return alert('Invalid values');
+    await fetch('/api/heater', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({setpoint: sp, kp, ki, kd})});
+    const btn = document.querySelector('[onclick="heaterApply()"]');
+    btn.textContent = '✓'; setTimeout(() => btn.textContent = 'Apply', 1200);
+    updateHeater();
+  }
+
+  async function heaterAutoTune() {
+    if (_htAutotuning) {
+      await fetch('/api/heater', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({autotune_stop: true})});
+    } else {
+      const sp = parseFloat(document.getElementById('ht-setpoint').value);
+      if (!isNaN(sp)) await fetch('/api/heater', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({setpoint: sp, autotune_start: true})});
+    }
+    updateHeater();
+  }
+
+  async function updateFlight() {
+    try {
+      const f = await fetch('/api/flight').then(r => r.json());
+      const stEl = document.getElementById('flight-state-badge');
+      const alEl = document.getElementById('flight-launch-alt');
+      const names = {ground:'Ground',ascending:'Ascending ↗',descending:'Descending ↘',landed:'Landed ✓'};
+      const cls   = {ground:'flight-ground',ascending:'flight-ascending',descending:'flight-descending',landed:'flight-landed'};
+      stEl.textContent = names[f.state] || f.state;
+      stEl.className   = cls[f.state] || '';
+      alEl.textContent = f.launch_alt != null ? f.launch_alt.toFixed(0)+' m' : '-- m';
+    } catch(e) {}
+  }
+
+  async function updateMission() {
+    try {
+      const m = await fetch('/api/mission').then(r => r.json());
+      const barEl = document.getElementById('mission-log-bar');
+      if (m.active) {
+        const elapsed = m.elapsed >= 3600
+          ? `${Math.floor(m.elapsed/3600)}h${Math.floor((m.elapsed%3600)/60)}m`
+          : `${Math.floor(m.elapsed/60)}m${Math.floor(m.elapsed%60)}s`;
+        barEl.textContent = `GPS logging • ${m.count} rows · ${elapsed}`;
+        barEl.style.color = '#3fb950';
+      } else {
+        barEl.textContent = 'GPS logging: inactive';
+        barEl.style.color = '#484f58';
+      }
+    } catch(e) {}
+  }
+
+  updateHeater();  updateFlight();  updateMission();
+  setInterval(updateHeater,  3000);
+  setInterval(updateFlight,  5000);
+  setInterval(updateMission, 3000);
+
+  // ── LoRa TX power ───────────────────────────────────────────────────────────
+
+  async function updateLoraPower() {
+    try {
+      const d = await fetch('/api/lora/radio').then(r => r.json());
+      const sel = document.getElementById('lora-power');
+      const st = document.getElementById('lora-power-status');
+      const warn = document.getElementById('lora-power-warn');
+      if (d.tx_power_dbm != null) sel.value = String(d.tx_power_dbm);
+      st.textContent = `Active: ${d.tx_power_dbm} dBm (~${d.erp_mw} mW) — applied on next lora_tx cycle`;
+      warn.style.display = d.tx_power_dbm > 10 ? 'block' : 'none';
+      warn.textContent = d.tx_power_dbm > 10
+        ? 'Warning: above 10 mW ERP may not be legal on 433 MHz ISM in Germany.'
+        : '';
+    } catch (e) {}
+  }
+
+  async function loraPowerApply() {
+    const dbm = parseInt(document.getElementById('lora-power').value, 10);
+    await fetch('/api/lora/radio', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tx_power_dbm: dbm}),
+    });
+    updateLoraPower();
+  }
+
+  updateLoraPower();
+  setInterval(updateLoraPower, 8000);
+
+  // ── GPS ──────────────────────────────────────────────────────────────────────
+
+  async function updateGPS() {
+    try {
+      const d = await fetch('/api/gps').then(r => r.json());
+      const fixEl  = document.getElementById('gps-fix');
+      const latEl  = document.getElementById('gps-lat');
+      const lonEl  = document.getElementById('gps-lon');
+      const altEl  = document.getElementById('gps-alt');
+      const satsEl = document.getElementById('gps-sats');
+      const spdEl  = document.getElementById('gps-spd');
+      const timeEl = document.getElementById('gps-time');
+      const barEl  = document.getElementById('gps-status-bar');
+      const hasFix = d.fix && d.fix > 0 && (d.lat || 0) !== 0;
+      if (hasFix) {
+        const fl = d.fix >= 4 ? 'RTK' : d.fix >= 2 ? 'DGPS' : 'GPS';
+        const dm = (d.sats || 0) >= 4 ? '3D' : '2D';
+        fixEl.textContent = '● ' + fl + ' ' + dm;
+        fixEl.className = d.fix >= 2 ? 'gps-fix-ok' : 'gps-fix-warn';
+        const la = d.lat||0, lo = d.lon||0;
+        latEl.textContent = Math.abs(la).toFixed(6) + '° ' + (la>=0?'N':'S');
+        lonEl.textContent = Math.abs(lo).toFixed(6) + '° ' + (lo>=0?'E':'W');
+        altEl.textContent = (d.alt != null ? d.alt.toFixed(0) : '--') + ' m';
+        satsEl.textContent = (d.sats||0) + ' sats  ·  HDOP ' + (d.hdop!=null?d.hdop.toFixed(1):'--');
+        const spd = d.speed!=null ? d.speed.toFixed(1)+' km/h' : '--';
+        const hdg = d.heading!=null ? d.heading.toFixed(0)+'°' : '--';
+        spdEl.textContent = spd + '  ·  ' + hdg;
+        timeEl.textContent = d.time || '--';
+        const age = d.age_s != null ? d.age_s.toFixed(0)+'s ago' : '';
+        const src = d.source === 'emulated' ? ' (emulated)' : '';
+        barEl.textContent = 'Source: '+(d.source||'?')+src+(age ? '  ·  '+age : '');
+        barEl.style.color = d.stale ? '#f0883e' : '#484f58';
+      } else {
+        fixEl.textContent = '● No Fix';
+        fixEl.className = 'gps-fix-none';
+        ['gps-lat','gps-lon','gps-alt','gps-sats','gps-spd','gps-time'].forEach(id=>{
+          document.getElementById(id).textContent='--';
+        });
+        if (d.source === 'none') {
+          barEl.textContent = 'LoRa service not running — start stratopi_lora.service';
+        } else {
+          barEl.textContent = 'Waiting for GPS fix… GPS TX → Pi pin 33 (GPIO13, UART5 RX)';
+        }
+        barEl.style.color = '#484f58';
+      }
+    } catch(e) { console.error('GPS:', e); }
+  }
+
+  updateGPS();
+  setInterval(updateGPS, 3000);
+
+  // ── Environmental sensors ────────────────────────────────────────────────
+  function _sv(v, bad){ return (v===undefined||v===null||v===''||v===bad) ? null : v; }
+
+  async function updateSensors() {
+    try {
+      const d = await fetch('/api/sensors').then(r => r.json());
+      const L = d.latest || {};
+      const set = (id, txt) => { const e=document.getElementById(id); if(e) e.textContent = txt; };
+
+      const t  = _sv(L.T, -999);    set('s-aht-t',  t  !== null ? t.toFixed(1)+' °C' : '-- °C');
+      const rh = _sv(L.RH, -999);   set('s-aht-rh', rh !== null ? rh.toFixed(1)+' % RH' : '-- % RH');
+
+      const aqi  = _sv(L.AQI, 255); set('s-aqi',  'AQI '  + (aqi!==null?aqi:'--') + (aqi!==null?'  '+['','Excellent','Good','Moderate','Poor','Unhealthy'][aqi]||'':''));
+      const tvoc = _sv(L.TVOC, -1); set('s-tvoc', 'TVOC ' + (tvoc!==null?tvoc:'--') + ' ppb');
+      const eco2 = _sv(L.eCO2, -1); set('s-eco2', 'eCO₂ ' + (eco2!==null?eco2:'--') + ' ppm');
+
+      const pm = (id,v,lab)=>{ v=_sv(v,9999); set(id, lab+' '+(v!==null?v:'--')+' µg/m³'); };
+      pm('s-pm1', L.PM1, 'PM1.0'); pm('s-pm25', L.PM25, 'PM2.5'); pm('s-pm10', L.PM10, 'PM10');
+
+      const ds=(id,v,lab)=>{ v=_sv(v,-127); set(id, lab+' '+(v!==null?v.toFixed(1)+' °C':'--')); };
+      ds('s-ds-cell', L.DS_cell, 'Cell'); ds('s-ds-env1', L.DS_env1, 'Env1'); ds('s-ds-env2', L.DS_env2, 'Env2');
+
+      // populate interval inputs (only when not focused, so edits aren't clobbered)
+      const iv = d.intervals || {};
+      for (const k of ['aht21','ens160','plantower','ds18b20','csv']) {
+        const e = document.getElementById('iv-'+k);
+        if (e && e !== document.activeElement && iv[k] !== undefined) e.value = iv[k];
+      }
+
+      const age = document.getElementById('sensors-age');
+      if (age) age.textContent = L.ts ? ('updated ' + new Date().toLocaleTimeString()) : 'no data yet';
+      const rows = document.getElementById('sensors-rows');
+      if (rows) rows.textContent = (d.history ? d.history.length : 0) + ' rows logged · CSV every ' + (iv.csv||10) + ' s';
+    } catch(e) { console.warn('sensors:', e); }
+  }
+
+  async function applySensorIntervals() {
+    const body = {};
+    for (const k of ['aht21','ens160','plantower','ds18b20','csv']) {
+      const v = parseFloat(document.getElementById('iv-'+k).value);
+      if (!isNaN(v)) body[k] = v;
+    }
+    try {
+      await fetch('/api/sensors/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const st = document.getElementById('iv-status');
+      if (st) { st.textContent = '✓ saved'; setTimeout(()=>{ st.textContent=''; }, 2000); }
+    } catch(e) { console.warn('intervals:', e); }
+  }
+
+  async function resetSensorLog() {
+    if (!confirm('Clear the sensor data log and start fresh?')) return;
+    try { await fetch('/api/sensors/reset', {method:'POST'}); updateSensors(); }
+    catch(e) { console.warn('reset:', e); }
+  }
+
+  updateSensors();
+  setInterval(updateSensors, 5000);
 
   // ── Init ──────────────────────────────────────────────────────────────────
 

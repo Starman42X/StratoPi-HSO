@@ -3,66 +3,194 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>StratoPi HSO — Ground Station</title>
+<title>Ground Control — StratoPI Offenburg AeroSpace</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;overflow:hidden}
-  header{background:#161b22;border-bottom:1px solid #30363d;padding:10px 20px;display:flex;align-items:center;gap:20px;flex-shrink:0}
-  header h1{color:#58a6ff;font-size:1.1rem;font-weight:700}
-  .status-chip{font-size:.75rem;padding:3px 10px;border-radius:12px;font-weight:600}
+  html{height:100%}
+  body{
+    background:#0d1117;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif;
+    display:flex;flex-direction:column;height:100%;min-height:100vh;min-height:100dvh;
+    overflow:hidden;
+  }
+  header{
+    background:#161b22;border-bottom:1px solid #30363d;padding:10px 16px;
+    display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;flex-shrink:0;
+  }
+  .brand{flex:1 1 auto;min-width:0}
+  .brand h1{color:#58a6ff;font-size:clamp(.95rem,2.5vw,1.15rem);font-weight:700;line-height:1.2}
+  .brand .sub{color:#8b949e;font-size:.72rem;font-weight:500;letter-spacing:.04em;margin-top:2px}
+  .header-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-left:auto}
+  .status-chip{font-size:.75rem;padding:3px 10px;border-radius:12px;font-weight:600;white-space:nowrap}
   .chip-ok{background:#1a3a1f;color:#3fb950;border:1px solid #2ea043}
   .chip-warn{background:#3a2a00;color:#f0883e;border:1px solid #d29922}
   .chip-err{background:#3a1a1a;color:#f85149;border:1px solid #da3633}
-  .main{display:flex;flex:1;overflow:hidden}
-  #map{flex:1;background:#1c2128}
-  .sidebar{width:340px;background:#161b22;border-left:1px solid #30363d;display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
-  .panel{border-bottom:1px solid #21262d;padding:14px}
+  .main{
+    display:flex;flex:1 1 auto;min-height:0;overflow:hidden;
+    flex-direction:row;
+  }
+  .map-col{
+    flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;
+    background:#1c2128;
+  }
+  #map{
+    flex:1 1 auto;min-width:0;min-height:0;position:relative;
+  }
+  #map .leaflet-container{height:100%;width:100%}
+  .map-toolbar{
+    display:flex;align-items:center;gap:8px;padding:6px 10px;
+    background:#161b22;border-top:1px solid #30363d;flex-shrink:0;
+  }
+  .map-toolbar .btn{margin-top:0}
+  .height-profile-wrap{
+    flex:0 0 120px;min-height:90px;max-height:180px;
+    background:#0d1117;border-top:1px solid #21262d;padding:6px 10px 8px;
+    display:flex;flex-direction:column;gap:4px;
+  }
+  .height-profile-wrap h4{
+    font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;
+    color:#8b949e;font-weight:600;
+  }
+  #height-profile-canvas{
+    flex:1 1 auto;width:100%;min-height:60px;border-radius:4px;
+    background:#161b22;border:1px solid #21262d;
+  }
+  .sidebar-resizer{
+    flex:0 0 6px;cursor:col-resize;background:#21262d;
+    border-left:1px solid #30363d;border-right:1px solid #30363d;
+    transition:background .15s;position:relative;z-index:5;
+  }
+  .sidebar-resizer:hover,.sidebar-resizer.dragging{background:#388bfd55}
+  .sidebar{
+    flex:0 0 var(--sidebar-w,360px);width:var(--sidebar-w,360px);
+    min-width:260px;max-width:min(720px,75vw);
+    background:#161b22;border-left:1px solid #30363d;
+    overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;
+    -webkit-overflow-scrolling:touch;
+  }
+  .sidebar-title{
+    position:sticky;top:0;z-index:2;background:#161b22;
+    border-bottom:1px solid #21262d;padding:12px 14px 10px;
+  }
+  .sidebar-title h2{font-size:.85rem;color:#e6edf3;font-weight:700}
+  .sidebar-title p{font-size:.68rem;color:#8b949e;margin-top:2px}
+  .share-chip{font-size:.7rem;color:#58a6ff;word-break:break-all}
+  .map-float-btn{
+    position:absolute;z-index:800;right:12px;top:12px;
+    font-size:.75rem;padding:6px 12px;border-radius:6px;
+    border:1px solid #30363d;background:#161b22ee;color:#e6edf3;
+    cursor:pointer;backdrop-filter:blur(4px);
+  }
+  .map-float-btn:hover{border-color:#58a6ff;color:#58a6ff}
+  .panel{border-bottom:1px solid #21262d;padding:14px;flex-shrink:0}
   .panel h3{color:#8b949e;font-size:.72rem;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px}
-  .kv{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
-  .kv-key{color:#8b949e;font-size:.82rem}
-  .kv-val{color:#e6edf3;font-size:.88rem;font-weight:600;font-family:monospace}
-  .kv-val.big{font-size:1.4rem;color:#58a6ff}
+  .panel-raw{border-bottom:none;padding-bottom:14px}
+  .kv{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:5px}
+  .kv-key{color:#8b949e;font-size:.82rem;flex-shrink:0}
+  .kv-val{color:#e6edf3;font-size:.88rem;font-weight:600;font-family:monospace;text-align:right;word-break:break-word}
+  .kv-val.big{font-size:clamp(1.1rem,3vw,1.4rem);color:#58a6ff}
   .kv-val.green{color:#3fb950}
   .kv-val.orange{color:#f0883e}
   .kv-val.red{color:#f85149}
   .alt-bar-wrap{background:#21262d;border-radius:4px;height:8px;margin:8px 0 4px;overflow:hidden}
   .alt-bar{background:linear-gradient(90deg,#1f6feb,#58a6ff);height:100%;border-radius:4px;transition:width .5s}
   .alt-label{display:flex;justify-content:space-between;font-size:.72rem;color:#484f58}
-  .raw-log{flex:1;overflow-y:auto;padding:10px;font-family:monospace;font-size:.72rem;color:#484f58}
+  .raw-log{
+    max-height:min(200px,28vh);overflow-y:auto;padding:10px;
+    font-family:monospace;font-size:.72rem;color:#484f58;
+    background:#0d1117;border:1px solid #21262d;border-radius:6px;
+  }
   .raw-log .entry{color:#8b949e;margin-bottom:3px;word-break:break-all}
   .raw-log .entry.new{color:#3fb950}
-  #no-data{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:.9rem;gap:8px}
+  #no-data{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:.9rem;gap:8px;padding:16px;text-align:center}
   .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
   .dot.green{background:#3fb950;box-shadow:0 0 6px #3fb950}
   .dot.grey{background:#484f58}
   .dot.pulse{animation:pulse 1s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   #track-count{color:#484f58;font-size:.75rem}
+  #last-rx-ts{color:#484f58;font-size:.75rem;white-space:nowrap}
   .compass{font-size:1.1rem}
+  .alt-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;margin:8px 0}
+  .alt-grid label{font-size:.78rem;color:#8b949e;display:flex;align-items:center;gap:6px;cursor:pointer}
+  .alt-grid input{accent-color:#58a6ff}
+  .btn-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .btn{font-size:.72rem;padding:5px 10px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#e6edf3;cursor:pointer}
+  .btn:hover{border-color:#58a6ff;color:#58a6ff}
+  .btn.primary{background:#1f3a5f;border-color:#388bfd;color:#58a6ff}
+  .alert-log{font-size:.72rem;color:#8b949e;max-height:72px;overflow-y:auto;margin-top:6px}
+  .alert-log .hit{color:#3fb950;margin-bottom:4px}
+  .toggle-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:.78rem;color:#8b949e;gap:8px}
+  .sig-bar-wrap{background:#21262d;border-radius:4px;height:10px;margin:8px 0;overflow:hidden}
+  .sig-bar{height:100%;border-radius:4px;transition:width .4s,background .4s}
+  .sig-hint{font-size:.7rem;color:#484f58;margin-top:4px;line-height:1.35}
+  .field-row{display:flex;gap:6px;margin-bottom:6px}
+  .field-row select,.panel select{
+    flex:1;min-width:0;background:#21262d;color:#e6edf3;
+    border:1px solid #30363d;border-radius:6px;padding:6px;font-size:.82rem;
+  }
+  .panel select.full{width:100%;margin-bottom:6px}
+
+  @media (max-width:900px){
+    .main{flex-direction:column}
+    .map-col{flex:1 1 45%;min-height:220px;border-bottom:1px solid #30363d}
+    .sidebar-resizer{display:none}
+    .sidebar{
+      flex:1 1 55%;width:100%!important;max-width:none;border-left:none;
+      border-top:1px solid #30363d;
+    }
+    header .header-meta{margin-left:0;width:100%}
+    .height-profile-wrap{flex-basis:100px}
+  }
+  @media (max-width:520px){
+    #map{flex-basis:38%;min-height:180px}
+    .alt-grid{grid-template-columns:1fr}
+    .panel{padding:12px}
+  }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>StratoPi HSO — Ground Station</h1>
-  <span id="rx-chip" class="status-chip chip-warn">Waiting for signal…</span>
-  <span id="src-chip" class="status-chip chip-warn" style="display:none"></span>
-  <span id="track-count"></span>
-  <span style="margin-left:auto;color:#484f58;font-size:.78rem" id="last-rx-ts"></span>
+  <div class="brand">
+    <h1>Ground Control</h1>
+    <div class="sub">StratoPI Offenburg AeroSpace</div>
+  </div>
+  <div class="header-meta">
+    <span id="rx-chip" class="status-chip chip-warn">Waiting for signal…</span>
+    <span id="src-chip" class="status-chip chip-warn" style="display:none"></span>
+    <span id="track-count"></span>
+    <span id="crypto-chip" class="status-chip chip-warn" style="display:none"></span>
+    <span id="share-chip" class="status-chip chip-warn" style="display:none" title="Share URL"></span>
+    <span id="last-rx-ts"></span>
+  </div>
 </header>
 
 <div class="main">
-  <div id="map">
-    <div id="no-data">
-      <div style="font-size:2rem">📡</div>
-      <div>Waiting for telemetry…</div>
-      <div style="font-size:.78rem">Serial LoRa HAT or gr-lora UDP:5005</div>
+  <div class="map-col">
+    <div id="map">
+      <div id="no-data">
+        <div style="font-size:2rem">📡</div>
+        <div>Waiting for telemetry…</div>
+        <div style="font-size:.78rem">Serial LoRa HAT or gr-lora UDP:5005</div>
+      </div>
+      <button type="button" class="map-float-btn" id="btn-center-map" title="Zoom to 1 km radius around HAB">⊙ Center 1 km</button>
+    </div>
+    <div class="height-profile-wrap">
+      <h4>Height profile</h4>
+      <canvas id="height-profile-canvas"></canvas>
     </div>
   </div>
 
-  <div class="sidebar">
+  <div class="sidebar-resizer" id="sidebar-resizer" title="Drag to resize Ground Control panel"></div>
+
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-title">
+      <h2>Ground Control</h2>
+      <p>StratoPI Offenburg AeroSpace</p>
+      <p class="share-chip" id="share-url-hint" style="display:none"></p>
+    </div>
 
     <!-- Altitude -->
     <div class="panel">
@@ -100,6 +228,162 @@
       </div>
     </div>
 
+    <!-- Altitude alerts -->
+    <div class="panel">
+      <h3>Altitude alerts</h3>
+      <div class="toggle-row">
+        <span>Windows notifications</span>
+        <input type="checkbox" id="cfg-notify" checked>
+      </div>
+      <div class="toggle-row">
+        <span>Economy TX on Pi (55s lean)</span>
+        <input type="checkbox" id="cfg-economy" checked>
+      </div>
+      <p style="font-size:.72rem;color:#484f58;margin-bottom:6px">
+        Check altitudes for alerts. Pi sends one <b>diagnostic</b> packet at each milestone.
+      </p>
+      <div class="alt-grid" id="milestone-grid"></div>
+      <div class="btn-row">
+        <button class="btn primary" id="btn-save-alerts">Save</button>
+        <button class="btn" id="btn-sync-pi">Sync to Pi</button>
+        <button class="btn" id="btn-reset-alerts">Reset triggered</button>
+      </div>
+      <div class="alert-log" id="alert-log"></div>
+    </div>
+
+    <!-- LoRa encryption -->
+    <div class="panel">
+      <h3>LoRa encryption</h3>
+      <div class="toggle-row">
+        <span>AES encrypt telemetry</span>
+        <input type="checkbox" id="cfg-crypto-enabled" checked>
+      </div>
+      <p class="sig-hint" style="margin-bottom:6px">
+        <b>Preflight only:</b> sync the key to the Pi while it is still on the ground (Wi‑Fi on).
+        The key is saved to <code>lora_crypto.json</code> on the Pi — no Wi‑Fi needed in flight.
+        Wi‑Fi turns off at launch; LoRa keeps using the stored key until landing.
+        Confirm <b>Key on Pi: Matched</b> before release.
+        Encryption does <b>not</b> lower RF power; packets are ~75 bytes longer, adding ~0.4–0.5 s
+        air time per TX on SF12 — fine at economy 55 s, still under 10% duty.
+      </p>
+      <div class="kv">
+        <span class="kv-key">Pi Wi‑Fi</span>
+        <span class="kv-val" id="crypto-pi-link">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Key on Pi</span>
+        <span class="kv-val" id="crypto-key-match">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">LoRa decrypt</span>
+        <span class="kv-val" id="crypto-decrypt">—</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="btn-crypto-sync">Sync key to Pi</button>
+      </div>
+      <p class="sig-hint" id="crypto-status">Checking Pi connection…</p>
+    </div>
+
+    <!-- LoRa radio help -->
+    <div class="panel">
+      <h3>LoRa settings</h3>
+      <p class="sig-hint" style="margin-bottom:6px">
+        <b>Channel (CH)</b> — E22 frequency slot. Roughly <code>410.125 + CH</code> MHz
+        (CH24 ≈ 434.1 MHz on our hardware). Pi and ground must use the <b>same CH</b>.
+      </p>
+      <p class="sig-hint" style="margin-bottom:6px">
+        <b>Air 3 / 4 / 5</b> — LoRa mode presets on the E22 (not literal kbps). On our modules:
+        air <b>3</b> = SF12 + 125 kHz BW (best range, flight default);
+        air <b>4</b> = SF12 + 125 kHz;
+        air <b>5</b> = SF12 + 250 kHz (faster, shorter range).
+        Both ends must match.
+      </p>
+      <p class="sig-hint">
+        Flight default: <b>CH24 + air 3</b> @ 10 dBm on the HAB.
+      </p>
+    </div>
+
+    <!-- LoRa downlink -->
+    <div class="panel">
+      <h3>LoRa downlink</h3>
+      <p class="sig-hint" style="margin-bottom:8px">
+        Send a config ping from the ground LoRa module. The HAB receives it on the
+        <b>current link</b> and permanently applies the target settings.
+      </p>
+      <p style="font-size:.72rem;color:#8b949e;margin:6px 0 4px">Current link (TX on)</p>
+      <div class="field-row">
+        <select id="dl-link-ch" title="Channel">
+          <option value="24" selected>CH 24 (~434 MHz)</option>
+          <option value="23">CH 23</option>
+          <option value="25">CH 25</option>
+        </select>
+        <select id="dl-link-air" title="Air rate">
+          <option value="3" selected>air 3 — SF12/BW125</option>
+          <option value="4">air 4</option>
+          <option value="5">air 5</option>
+        </select>
+      </div>
+      <p style="font-size:.72rem;color:#8b949e;margin:6px 0 4px">Target on HAB (permanent)</p>
+      <div class="field-row">
+        <select id="dl-target-ch">
+          <option value="24" selected>CH 24</option>
+          <option value="23">CH 23</option>
+          <option value="25">CH 25</option>
+        </select>
+        <select id="dl-target-air">
+          <option value="3" selected>air 3</option>
+          <option value="4">air 4</option>
+          <option value="5">air 5</option>
+        </select>
+      </div>
+      <select id="dl-target-power" class="full">
+        <option value="10" selected>10 dBm — 10 mW (legal default)</option>
+        <option value="13">13 dBm — 20 mW</option>
+        <option value="17">17 dBm — 50 mW</option>
+        <option value="22">22 dBm — 160 mW (max)</option>
+      </select>
+      <div class="btn-row">
+        <button class="btn primary" id="btn-dl-ping">Send config ping @ 22 dBm</button>
+      </div>
+      <p class="sig-hint" id="dl-status">Ground module TX power is set via <code>config_e22_com.py</code> (stop this app first).</p>
+    </div>
+
+    <!-- RF signal -->
+    <div class="panel">
+      <h3>Signal quality</h3>
+      <div class="kv">
+        <span class="kv-key">RSSI</span>
+        <span class="kv-val" id="v-rssi">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Link</span>
+        <span class="kv-val" id="v-siglabel">—</span>
+      </div>
+      <div class="sig-bar-wrap">
+        <div class="sig-bar" id="sig-bar" style="width:0%;background:#484f58"></div>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Quality</span>
+        <span class="kv-val" id="v-sigpct">—</span>
+      </div>
+      <p class="sig-hint" id="sig-hint">
+        RSSI prefix is enabled via <code>config_e22_com.py</code> (with the ground app stopped).
+      </p>
+    </div>
+
+    <!-- Payload health -->
+    <div class="panel">
+      <h3>Payload</h3>
+      <div class="kv">
+        <span class="kv-key">Cell temp</span>
+        <span class="kv-val" id="v-celltemp">—</span>
+      </div>
+      <div class="kv">
+        <span class="kv-key">Heater duty</span>
+        <span class="kv-val" id="v-heater">—</span>
+      </div>
+    </div>
+
     <!-- GPS health -->
     <div class="panel">
       <h3>GPS / Signal</h3>
@@ -130,7 +414,7 @@
     </div>
 
     <!-- Raw log -->
-    <div class="panel" style="border-bottom:none;flex:1;display:flex;flex-direction:column;overflow:hidden;padding-bottom:0">
+    <div class="panel panel-raw">
       <h3>Raw packets</h3>
       <div class="raw-log" id="raw-log"></div>
     </div>
@@ -144,9 +428,13 @@
   let map = null;
   let marker = null;
   let polyline = null;
+  let rangeCircle = null;
   let mapInitialized = false;
   let lastSeq = -1;
+  let followCenter = false;
   const BURST_ALT = 32000;
+  const SIDEBAR_KEY = 'gc-sidebar-w';
+  const SIDEBAR_DEFAULT = 360;
 
   const HEADING_ARROWS = {
     N:'↑', NE:'↗', E:'→', SE:'↘', S:'↓', SW:'↙', W:'←', NW:'↖'
@@ -155,6 +443,10 @@
   function bearingLabel(deg){
     const dirs=['N','NE','E','SE','S','SW','W','NW'];
     return dirs[Math.round(deg/45)%8];
+  }
+
+  function resizeMap(){
+    if(map) map.invalidateSize({animate:false});
   }
 
   function initMap(lat, lon){
@@ -179,7 +471,170 @@
     });
     marker   = L.marker([lat, lon], {icon}).addTo(map);
     polyline = L.polyline([[lat, lon]], {color:'#58a6ff', weight:2, opacity:.8}).addTo(map);
+    map.on('dragstart zoomstart', () => { followCenter = false; });
     mapInitialized = true;
+    requestAnimationFrame(resizeMap);
+  }
+
+  window.addEventListener('resize', () => {
+    clearTimeout(window._mapResizeT);
+    window._mapResizeT = setTimeout(() => { resizeMap(); drawHeightProfile(lastTrack); }, 120);
+  });
+
+  // ── Draggable sidebar ─────────────────────────────────────────────────────
+
+  (function initSidebarResize(){
+    const root = document.documentElement;
+    const saved = parseInt(localStorage.getItem(SIDEBAR_KEY) || '', 10);
+    if(saved >= 260 && saved <= 720) root.style.setProperty('--sidebar-w', saved + 'px');
+    const resizer = document.getElementById('sidebar-resizer');
+    if(!resizer || window.matchMedia('(max-width:900px)').matches) return;
+    let dragging = false;
+    const onMove = (clientX) => {
+      const main = document.querySelector('.main');
+      const rect = main.getBoundingClientRect();
+      const w = Math.min(720, Math.max(260, rect.right - clientX));
+      root.style.setProperty('--sidebar-w', w + 'px');
+    };
+    resizer.addEventListener('mousedown', (e) => {
+      dragging = true;
+      resizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => { if(dragging) onMove(e.clientX); });
+    window.addEventListener('mouseup', () => {
+      if(!dragging) return;
+      dragging = false;
+      resizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const w = parseInt(getComputedStyle(root).getPropertyValue('--sidebar-w'), 10);
+      if(w) localStorage.setItem(SIDEBAR_KEY, String(w));
+      resizeMap();
+    });
+  })();
+
+  // ── Height profile ────────────────────────────────────────────────────────
+
+  let lastTrack = [];
+
+  function haversineM(a, b){
+    const R = 6371000;
+    const toR = d => d * Math.PI / 180;
+    const dLat = toR(b.lat - a.lat);
+    const dLon = toR(b.lon - a.lon);
+    const lat1 = toR(a.lat), lat2 = toR(b.lat);
+    const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  function trackDistances(track){
+    const dist = [0];
+    for(let i = 1; i < track.length; i++){
+      dist.push(dist[i-1] + haversineM(track[i-1], track[i]));
+    }
+    return dist;
+  }
+
+  function drawHeightProfile(track){
+    const canvas = document.getElementById('height-profile-canvas');
+    if(!canvas) return;
+    const wrap = canvas.parentElement;
+    const dpr = window.devicePixelRatio || 1;
+    const w = wrap.clientWidth - 20;
+    const h = Math.max(60, wrap.clientHeight - 28);
+    canvas.width = Math.max(1, w * dpr);
+    canvas.height = Math.max(1, h * dpr);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#484f58';
+    ctx.font = '10px Segoe UI, system-ui, sans-serif';
+    if(!track || track.length < 2){
+      ctx.fillText('Waiting for track…', 8, h/2);
+      return;
+    }
+    const dist = trackDistances(track);
+    const totalKm = dist[dist.length-1] / 1000;
+    const alts = track.map(p => p.alt ?? 0);
+    const minA = Math.min(...alts);
+    const maxA = Math.max(...alts, minA + 50);
+    const pad = {l:42, r:8, t:8, b:18};
+    const pw = w - pad.l - pad.r;
+    const ph = h - pad.t - pad.b;
+    const xAt = km => pad.l + (totalKm > 0 ? (km / totalKm) * pw : 0);
+    const yAt = alt => pad.t + ph - ((alt - minA) / (maxA - minA || 1)) * ph;
+    ctx.strokeStyle = '#30363d';
+    ctx.beginPath();
+    ctx.moveTo(pad.l, pad.t + ph);
+    ctx.lineTo(pad.l + pw, pad.t + ph);
+    ctx.stroke();
+    ctx.fillStyle = '#8b949e';
+    ctx.fillText('0 km', pad.l, h - 4);
+    if(totalKm > 0.01) ctx.fillText(totalKm.toFixed(1) + ' km', pad.l + pw - 36, h - 4);
+    ctx.fillText(Math.round(maxA) + ' m', 4, pad.t + 8);
+    ctx.fillText(Math.round(minA) + ' m', 4, pad.t + ph);
+    ctx.strokeStyle = '#58a6ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    track.forEach((p, i) => {
+      const x = xAt(dist[i] / 1000);
+      const y = yAt(p.alt ?? 0);
+      if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    const last = track[track.length - 1];
+    const lx = xAt(dist[dist.length-1] / 1000);
+    const ly = yAt(last.alt ?? 0);
+    ctx.fillStyle = '#da3633';
+    ctx.beginPath();
+    ctx.arc(lx, ly, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── Center map (1 km radius) ─────────────────────────────────────────────
+
+  function centerMap1km(lat, lon){
+    if(!map || lat == null || lon == null) return;
+    const dLat = 1000 / 111320;
+    const dLon = 1000 / (111320 * Math.cos(lat * Math.PI / 180));
+    const bounds = [[lat - dLat, lon - dLon], [lat + dLat, lon + dLon]];
+    map.fitBounds(bounds, {padding: [24, 24], maxZoom: 16});
+    if(rangeCircle) map.removeLayer(rangeCircle);
+    rangeCircle = L.circle([lat, lon], {
+      radius: 1000, color: '#58a6ff', weight: 1, fillColor: '#58a6ff',
+      fillOpacity: 0.06, dashArray: '4 6',
+    }).addTo(map);
+    followCenter = true;
+  }
+
+  document.getElementById('btn-center-map').onclick = () => {
+    const st = window._lastPos;
+    if(st && st.lat != null && st.lon != null) centerMap1km(st.lat, st.lon);
+    else alert('No position yet — waiting for telemetry');
+  };
+  // ── Network share (whereami.local) ───────────────────────────────────────
+
+  async function pollNetwork(){
+    try{
+      const n = await fetch('/api/network').then(r=>r.json());
+      const chip = document.getElementById('share-chip');
+      const hint = document.getElementById('share-url-hint');
+      const url = (n.viewer_urls && n.viewer_urls[0]) || (n.urls && n.urls[0]) || '';
+      if(url){
+        chip.style.display = '';
+        chip.textContent = '📶 ' + url.replace(/^https?:\/\//,'');
+        chip.className = 'status-chip ' + (n.hotspot_ok || n.mdns_ok ? 'chip-ok' : 'chip-warn');
+        chip.title = (n.viewer_urls || n.urls || []).join('\n');
+        hint.style.display = '';
+        const hip = n.hotspot_ip ? ' (hotspot ' + n.hotspot_ip + ')' : '';
+        hint.textContent = 'Phones on PC hotspot — map only: ' + url + hip;
+      }
+    }catch(e){}
   }
 
   // ── Display update ─────────────────────────────────────────────────────────
@@ -193,9 +648,146 @@
 
   const FIX_LABELS = {0:'No fix', 1:'GPS', 2:'DGPS', 3:'3D GPS'};
 
+  function updateCrypto(crypto, link){
+    const chip = document.getElementById('crypto-chip');
+    if(!crypto || !crypto.enabled){
+      chip.style.display = 'none';
+      return;
+    }
+    chip.style.display = '';
+    if(crypto.key_configured && crypto.library_ok){
+      let label = '🔒 ' + (crypto.algorithm || 'AES');
+      if(link && link.key_match === false) label += ' · key mismatch';
+      else if(link && link.pi_reachable === false) label += ' · Pi offline';
+      chip.textContent = label;
+      chip.className = 'status-chip ' + (
+        link && (link.key_match === false || link.pi_reachable === false) ? 'chip-warn' : 'chip-ok'
+      );
+    } else {
+      chip.textContent = '🔒 key missing';
+      chip.className = 'status-chip chip-err';
+    }
+  }
+
+  function updateCryptoPanel(check, linkInfo){
+    if(!check) return;
+    const piEl = document.getElementById('crypto-pi-link');
+    const keyEl = document.getElementById('crypto-key-match');
+    const decEl = document.getElementById('crypto-decrypt');
+    const st = document.getElementById('crypto-status');
+    if(check.pi_reachable){
+      const host = (check.pi_url || 'stratopi.local:8080').replace(/^https?:\/\//,'');
+      piEl.textContent = 'OK · ' + host;
+      piEl.className = 'kv-val green';
+    } else {
+      const hint = linkInfo && linkInfo.local_hints && linkInfo.local_hints.length
+        ? ' — try 192.168.4.1' : ' — join home Wi‑Fi or Strato-HSO hotspot';
+      piEl.textContent = 'Unreachable' + hint;
+      piEl.className = 'kv-val red';
+    }
+    if(check.key_match === true){
+      keyEl.textContent = 'Matched';
+      keyEl.className = 'kv-val green';
+    } else if(check.key_match === false){
+      keyEl.textContent = 'Mismatch — tap Sync';
+      keyEl.className = 'kv-val red';
+    } else if(!check.pi_reachable){
+      keyEl.textContent = '—';
+      keyEl.className = 'kv-val';
+    } else {
+      keyEl.textContent = 'Unknown';
+      keyEl.className = 'kv-val orange';
+    }
+    const lk = check.link || {};
+    if(lk.encrypted_rx > 0){
+      if(lk.decrypt_working){
+        decEl.textContent = `OK (${lk.decrypt_ok} packets)`;
+        decEl.className = 'kv-val green';
+      } else if(lk.decrypt_fail > 0){
+        decEl.textContent = `Failed ${lk.decrypt_fail} / ${lk.encrypted_rx}`;
+        decEl.className = 'kv-val red';
+      } else {
+        decEl.textContent = 'Waiting…';
+        decEl.className = 'kv-val orange';
+      }
+    } else if(check.local && check.local.enabled){
+      decEl.textContent = 'No encrypted RX yet';
+      decEl.className = 'kv-val';
+    } else {
+      decEl.textContent = 'Off';
+      decEl.className = 'kv-val';
+    }
+    const parts = [];
+    if(check.health_error) parts.push(check.health_error);
+    if(check.crypto_error) parts.push(check.crypto_error);
+    if(check.local && check.local.algorithm) parts.push(check.local.algorithm);
+    st.textContent = parts.length ? parts.join(' · ') : (
+      check.pi_reachable && check.key_match
+        ? 'Pi has the key — encrypted telemetry will decrypt here.'
+        : check.pi_reachable
+          ? 'Pi online — sync key if needed.'
+          : 'Connect to home Wi‑Fi (stratopi.local:8080) or Pi hotspot Strato-HSO (192.168.4.1:8080), then Sync.'
+    );
+    st.style.color = check.pi_reachable && check.key_match ? '#3fb950' : '#8b949e';
+  }
+
+  async function loadCryptoConfig(){
+    const c = await fetch('/api/lora/crypto').then(r=>r.json());
+    document.getElementById('cfg-crypto-enabled').checked = !!c.enabled;
+    updateCrypto(c, c.link);
+  }
+
+  async function saveCryptoEnabled(){
+    const enabled = document.getElementById('cfg-crypto-enabled').checked;
+    const st = document.getElementById('crypto-status');
+    st.textContent = 'Saving and syncing to Pi…';
+    st.style.color = '#f0883e';
+    const r = await fetch('/api/lora/crypto', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled}),
+    }).then(r=>r.json());
+    updateCrypto(r, r.link);
+    if(!r.ok){
+      st.textContent = 'Sync failed: ' + ((r.sync && r.sync.error) || 'Pi unreachable');
+      st.style.color = '#f85149';
+      return;
+    }
+    st.textContent = 'Encryption ' + (enabled ? 'on' : 'off') + ' — key pushed to Pi.';
+    st.style.color = '#3fb950';
+    pollCryptoCheck();
+  }
+
+  async function syncCryptoToPi(){
+    const st = document.getElementById('crypto-status');
+    st.textContent = 'Syncing key to Pi…';
+    st.style.color = '#f0883e';
+    const r = await fetch('/api/lora/crypto/sync', {method:'POST'}).then(r=>r.json());
+    if(r.check) updateCryptoPanel(r.check);
+    if(!r.ok){
+      st.textContent = 'Sync failed: ' + ((r.sync && r.sync.error) || 'unknown');
+      st.style.color = '#f85149';
+      return;
+    }
+    st.textContent = 'Key synced to ' + (r.sync.pi_url || 'Pi');
+    st.style.color = '#3fb950';
+  }
+
+  async function pollCryptoCheck(){
+    try{
+      const [c, link] = await Promise.all([
+        fetch('/api/lora/crypto/check').then(r=>r.json()),
+        fetch('/api/pi/link').then(r=>r.json()).catch(() => null),
+      ]);
+      updateCryptoPanel(c, link);
+      if(c.local) updateCrypto(c.local, c.link || {});
+    }catch(e){}
+  }
+
   function updateUI(d){
     const f = d.latest;
     if(!f) return;
+    if(d.crypto) updateCrypto(d.crypto, d.crypto_link);
 
     // Altitude
     const altPct = Math.min(100, (f.alt / BURST_ALT) * 100);
@@ -216,13 +808,30 @@
     const arr  = HEADING_ARROWS[bearingLabel(hdg)] || '';
     setVal('v-heading', `${arr} ${hdg.toFixed(0)}° ${bearingLabel(hdg)}`);
 
+    // Signal
+    updateSignal(d.signal);
+
+    // Payload
+    if (f.cell_temp != null) {
+      setVal('v-celltemp', `${f.cell_temp.toFixed(1)} °C`,
+             f.cell_temp < -10 || f.cell_temp > 45 ? 'red' : f.cell_temp > 35 ? 'orange' : 'green');
+    } else {
+      setVal('v-celltemp', '—');
+    }
+    if (f.heater_duty != null) {
+      setVal('v-heater', `${f.heater_duty.toFixed(0)} %`, f.heater_duty > 0 ? 'orange' : '');
+    } else {
+      setVal('v-heater', '—');
+    }
+
     // GPS health
     setVal('v-sats',  f.sats,    f.sats >= 6 ? 'green' : f.sats >= 4 ? 'orange' : 'red');
     setVal('v-hdop',  f.hdop.toFixed(1), f.hdop < 2 ? 'green' : f.hdop < 5 ? 'orange' : 'red');
     setVal('v-fix',   FIX_LABELS[f.fix] || f.fix);
     setVal('v-time',  f.time);
     setVal('v-rxcount', d.rx_count, 'green');
-    setVal('v-seq',   `#${f.seq.toString().padStart(5,'0')}`);
+    const diag = f.packet_type === 'diagnostic' ? ` · DIAG@${f.milestone_m}m` : '';
+    setVal('v-seq',   `#${f.seq.toString().padStart(5,'0')}${diag}`);
 
     // Status chips
     const chip = document.getElementById('rx-chip');
@@ -240,23 +849,29 @@
     }
 
     // Map
-    if(!mapInitialized && f.lat && f.lon){
+    window._lastPos = {lat: f.lat, lon: f.lon};
+    if(!mapInitialized && f.lat != null && f.lon != null){
       initMap(f.lat, f.lon);
     }
-    if(mapInitialized && f.lat && f.lon){
+    if(mapInitialized && f.lat != null && f.lon != null){
       marker.setLatLng([f.lat, f.lon]);
       marker.bindTooltip(
         `<b>${f.callsign}</b><br>Alt: ${f.alt.toFixed(0)} m<br>Seq: #${f.seq}`,
         {permanent: false}
       );
+      if(followCenter) centerMap1km(f.lat, f.lon);
     }
 
-    // Track
-    if(d.track && d.track.length > 0 && mapInitialized){
-      const pts = d.track.map(p => [p.lat, p.lon]);
-      polyline.setLatLngs(pts);
+    // Track + height profile
+    if(d.track && d.track.length > 0){
+      lastTrack = d.track;
+      if(mapInitialized){
+        const pts = d.track.map(p => [p.lat, p.lon]);
+        polyline.setLatLngs(pts);
+      }
       document.getElementById('track-count').textContent =
         `${d.track.length} track points`;
+      drawHeightProfile(d.track);
     }
   }
 
@@ -267,6 +882,37 @@
     ).join('');
   }
 
+  function sigColor(pct){
+    if(pct >= 70) return '#3fb950';
+    if(pct >= 45) return '#58a6ff';
+    if(pct >= 25) return '#f0883e';
+    return '#f85149';
+  }
+
+  function updateSignal(sig){
+    if(!sig) return;
+    const bar = document.getElementById('sig-bar');
+    const hint = document.getElementById('sig-hint');
+    if(sig.rssi_dbm == null){
+      setVal('v-rssi', '—');
+      setVal('v-siglabel', 'No RSSI');
+      setVal('v-sigpct', '—');
+      bar.style.width = '0%';
+      return;
+    }
+    const pct = sig.quality_pct ?? 0;
+    setVal('v-rssi', `${sig.rssi_dbm.toFixed(1)} dBm`);
+    setVal('v-siglabel', sig.label || '—', pct >= 45 ? 'green' : pct >= 25 ? 'orange' : 'red');
+    setVal('v-sigpct', `${pct}%`, pct >= 45 ? 'green' : 'orange');
+    bar.style.width = pct + '%';
+    bar.style.background = sigColor(pct);
+    if(sig.packets_with_rssi > 0){
+      hint.textContent = `${sig.packets_with_rssi} packets with RSSI`;
+    } else if(sig.rssi_dbm == null){
+      hint.textContent = 'No RSSI yet — run config_e22_com.py with the ground app stopped';
+    }
+  }
+
   // ── Polling ────────────────────────────────────────────────────────────────
 
   async function poll(){
@@ -275,13 +921,144 @@
         fetch('/api/state').then(r=>r.json()),
         fetch('/api/raw').then(r=>r.json()),
       ]);
+      updateCrypto(state.crypto, state.crypto_link);
       if(state.latest) updateUI(state);
       updateRawLog(raw);
     } catch(e){ console.warn('Poll error:', e) }
   }
 
+  // ── LoRa downlink (ground -> HAB) ──────────────────────────────────────────
+
+  async function refreshDownlink(){
+    try {
+      const d = await fetch('/api/lora/downlink').then(r=>r.json());
+      const st = document.getElementById('dl-status');
+      if(d.last_ping){
+        st.textContent = d.last_ping.message || 'Ping sent';
+        st.style.color = '#3fb950';
+      }
+      if(d.last_ack){
+        st.textContent = `HAB ACK: CH${d.last_ack.channel} air${d.last_ack.air_rate} ${d.last_ack.tx_power_dbm} dBm`;
+        st.style.color = '#58a6ff';
+      }
+    } catch(e){
+      document.getElementById('dl-status').textContent = 'Downlink API error';
+    }
+  }
+
+  async function sendDownlinkPing(){
+    const body = {
+      link_channel: parseInt(document.getElementById('dl-link-ch').value, 10),
+      link_air_rate: parseInt(document.getElementById('dl-link-air').value, 10),
+      target_channel: parseInt(document.getElementById('dl-target-ch').value, 10),
+      target_air_rate: parseInt(document.getElementById('dl-target-air').value, 10),
+      target_tx_power_dbm: parseInt(document.getElementById('dl-target-power').value, 10),
+      tx_dbm: 22,
+      repeats: 3,
+    };
+    const st = document.getElementById('dl-status');
+    st.textContent = 'Sending…';
+    st.style.color = '#f0883e';
+    const d = await fetch('/api/lora/downlink/ping', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    }).then(r=>r.json());
+    if(!d.ok){
+      alert('Downlink failed: ' + (d.error || 'unknown'));
+      st.textContent = d.error || 'Failed';
+      st.style.color = '#f85149';
+      return;
+    }
+    st.textContent = d.message || 'Ping sent — waiting for HAB ACK…';
+    st.style.color = '#3fb950';
+    refreshDownlink();
+  }
+
+  document.getElementById('btn-dl-ping').onclick = sendDownlinkPing;
+  refreshDownlink();
+  setInterval(refreshDownlink, 3000);
+
+  // ── Altitude alert config ─────────────────────────────────────────────────
+
+  let alertCfg = null;
+
+  async function loadAlertConfig(){
+    alertCfg = await fetch('/api/alerts/config').then(r=>r.json());
+    document.getElementById('cfg-notify').checked = !!alertCfg.notifications_enabled;
+    document.getElementById('cfg-economy').checked = !!alertCfg.economy_mode;
+    const enabled = new Set(alertCfg.enabled_milestones || []);
+    const grid = document.getElementById('milestone-grid');
+    const presets = alertCfg.milestones_m || [500,1000,2000,5000,10000,15000,20000,25000,30000];
+    grid.innerHTML = presets.map(m => {
+      const on = enabled.has(m) ? 'checked' : '';
+      const hit = (alertCfg.triggered_m || []).includes(m) ? ' ✓' : '';
+      return `<label><input type="checkbox" data-m="${m}" ${on}> ${m.toLocaleString()} m${hit}</label>`;
+    }).join('');
+    renderAlertLog(alertCfg.triggered_m || []);
+  }
+
+  function renderAlertLog(triggered){
+    const log = document.getElementById('alert-log');
+    if(!triggered.length){ log.innerHTML = '<div>No milestones triggered yet</div>'; return; }
+    log.innerHTML = triggered.map(m => `<div class="hit">Passed ${m.toLocaleString()} m</div>`).join('');
+  }
+
+  async function saveAlertConfig(){
+    const enabled = [...document.querySelectorAll('#milestone-grid input:checked')]
+      .map(el => parseInt(el.dataset.m, 10));
+    const patch = {
+      notifications_enabled: document.getElementById('cfg-notify').checked,
+      economy_mode: document.getElementById('cfg-economy').checked,
+      enabled_milestones: enabled,
+    };
+    alertCfg = await fetch('/api/alerts/config', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(patch),
+    }).then(r=>r.json());
+    await loadAlertConfig();
+  }
+
+  async function syncPi(){
+    const r = await fetch('/api/alerts/sync-pi', {method:'POST'}).then(r=>r.json());
+    if(!r.ok) alert('Pi sync failed: ' + (r.error || 'unknown'));
+    else alert('Pi config updated — milestones + economy mode synced.');
+  }
+
+  async function resetAlerts(){
+    await fetch('/api/alerts/reset', {method:'POST'});
+    await loadAlertConfig();
+  }
+
+  async function pollAlerts(){
+    try{
+      const ev = await fetch('/api/alerts/events').then(r=>r.json());
+      if(ev.log && ev.log.length) await loadAlertConfig();
+      else if(alertCfg) renderAlertLog(alertCfg.triggered_m || []);
+      if(ev.browser && ev.browser.length && Notification.permission === 'granted'){
+        ev.browser.forEach(e => new Notification(e.title, {body: e.message}));
+      }
+    }catch(e){}
+  }
+
+  document.getElementById('btn-save-alerts').onclick = saveAlertConfig;
+  document.getElementById('btn-sync-pi').onclick = syncPi;
+  document.getElementById('btn-reset-alerts').onclick = resetAlerts;
+  document.getElementById('cfg-crypto-enabled').onchange = saveCryptoEnabled;
+  document.getElementById('btn-crypto-sync').onclick = syncCryptoToPi;
+
+  if('Notification' in window && Notification.permission === 'default'){
+    Notification.requestPermission();
+  }
+  loadAlertConfig();
+  loadCryptoConfig();
+  pollCryptoCheck();
+
   poll();
+  pollNetwork();
   setInterval(poll, 2000);
+  setInterval(pollAlerts, 3000);
+  setInterval(pollCryptoCheck, 15000);
+  setInterval(pollNetwork, 30000);
 </script>
 </body>
 </html>

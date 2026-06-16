@@ -1,0 +1,4 @@
+{
+  "enabled": true,
+  "key_hex": "REPLACE_WITH_output_of_gen_lora_key.py"
+}

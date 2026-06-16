@@ -16,3 +16,10 @@ fi
 
 echo "[wifi_fallback] No WiFi connection. Starting hotspot: $SSID"
 nmcli device wifi hotspot ifname wlan0 ssid "$SSID" password "$PASSWORD"
+sleep 2
+systemctl reload avahi-daemon 2>/dev/null || true
+echo "[wifi_fallback] Control panel:"
+echo "  http://stratopi.local:8080"
+echo "  http://192.168.4.1:8080"
+curl -sf http://127.0.0.1:8080/api/health >/dev/null && echo "[wifi_fallback] server OK on :8080" \
+  || echo "[wifi_fallback] WARN: stratopi.service not responding on :8080"

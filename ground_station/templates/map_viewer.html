@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Where Am I — StratoPI</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;width:100%;overflow:hidden;background:#1c2128}
+  #map{position:fixed;inset:0}
+  #map .leaflet-container{height:100%;width:100%;background:#1c2128}
+  #wait{
+    position:fixed;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:10px;
+    color:#8b949e;font-family:system-ui,sans-serif;font-size:.95rem;
+    background:#1c2128;z-index:500;pointer-events:none;
+  }
+  #wait.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="wait">
+  <div style="font-size:2rem">📡</div>
+  <div>Waiting for HAB position…</div>
+</div>
+<div id="map"></div>
+<script>
+  let map = null, marker = null, polyline = null, ready = false;
+
+  function initMap(lat, lon){
+    document.getElementById('wait').classList.add('hidden');
+    map = L.map('map', {zoomControl:true, attributionControl:true}).setView([lat, lon], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution:'© OpenStreetMap', maxZoom:19,
+    }).addTo(map);
+    const icon = L.divIcon({
+      html:'<div style="background:#da3633;border:2px solid #fff;border-radius:50% 50% 0 50%;width:20px;height:20px;transform:rotate(45deg);box-shadow:0 0 10px #da363399"></div>',
+      iconSize:[20,20], iconAnchor:[10,10], className:'',
+    });
+    marker = L.marker([lat, lon], {icon}).addTo(map);
+    polyline = L.polyline([[lat, lon]], {color:'#58a6ff', weight:3, opacity:.85}).addTo(map);
+    map.on('dragstart zoomstart', () => { window._userMoved = true; });
+    ready = true;
+    map.invalidateSize();
+  }
+
+  function update(d){
+    const f = d.latest;
+    if(!f || f.lat == null || f.lon == null) return;
+    if(!ready) initMap(f.lat, f.lon);
+    marker.setLatLng([f.lat, f.lon]);
+    if(d.track && d.track.length){
+      polyline.setLatLngs(d.track.map(p => [p.lat, p.lon]));
+      if(d.track.length > 1 && !window._userMoved){
+        map.fitBounds(polyline.getBounds(), {padding:[40,40], maxZoom:14});
+      }
+    }
+  }
+
+  async function poll(){
+    try{
+      const d = await fetch('/api/state').then(r => r.json());
+      update(d);
+    }catch(e){}
+  }
+  poll();
+  setInterval(poll, 2000);
+  window.addEventListener('resize', () => { if(map) map.invalidateSize(); });
+</script>
+</body>
+</html>

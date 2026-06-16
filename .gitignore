@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Ground station local state (copy from *.example on new laptop)
+ground_station/gs_alerts.json
+ground_station/lora_crypto.json
+lora_crypto.json
+
+# Build / portable output
+ground_station/build/
+ground_station/dist/
+portable/
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db

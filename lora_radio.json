@@ -1,0 +1,8 @@
+{
+  "tx_power_dbm": 10,
+  "channel": 24,
+  "air_rate": 3,
+  "freq_hz": 434105000,
+  "boost_once_pending": false,
+  "boost_once_dbm": 22
+}

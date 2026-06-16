@@ -54,25 +54,30 @@ def main():
     # Upload app files
     print("\nUploading files...")
     upload(sftp, LOCAL_BASE / "server.py", f"{REMOTE_APP}/server.py")
+    upload(sftp, LOCAL_BASE / "lora_tx.py", f"{REMOTE_APP}/lora_tx.py")
     upload(sftp, LOCAL_BASE / "templates/index.html", f"{REMOTE_APP}/templates/index.html")
     upload(sftp, LOCAL_BASE / "stratopi.service", f"{REMOTE_APP}/stratopi.service")
+    upload(sftp, LOCAL_BASE / "stratopi_lora.service", f"{REMOTE_APP}/stratopi_lora.service")
 
     # Install system packages
     print("\nInstalling system packages (this may take a minute)...")
     run(ssh, "sudo apt-get update -qq", check=False)
     run(ssh, "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3-venv ffmpeg v4l-utils libcamera-apps libcamera-tools 2>&1 | tail -5", check=False)
 
-    # Python venv + flask
+    # Python venv + dependencies
     print("\nSetting up Python venv...")
     run(ssh, f"python3 -m venv {REMOTE_APP}/venv")
-    run(ssh, f"{REMOTE_APP}/venv/bin/pip install --quiet flask")
+    run(ssh, f"{REMOTE_APP}/venv/bin/pip install --quiet flask pyserial pynmea2")
 
-    # Install systemd service
-    print("\nInstalling systemd service...")
+    # Install systemd services
+    print("\nInstalling systemd services...")
     run(ssh, f"sudo cp {REMOTE_APP}/stratopi.service /etc/systemd/system/")
+    run(ssh, f"sudo cp {REMOTE_APP}/stratopi_lora.service /etc/systemd/system/")
     run(ssh, "sudo systemctl daemon-reload")
     run(ssh, "sudo systemctl enable stratopi")
     run(ssh, "sudo systemctl restart stratopi")
+    run(ssh, "sudo systemctl enable stratopi_lora")
+    run(ssh, "sudo systemctl restart stratopi_lora")
 
     # Status check
     import time

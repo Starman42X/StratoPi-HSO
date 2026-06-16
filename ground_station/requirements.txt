@@ -1,3 +1,10 @@
 flask>=3.0
 pyserial>=3.5
 pynmea2>=1.19
+cryptography>=42.0
+zeroconf>=0.131.0
+winotify>=1.1.0; sys_platform == "win32"
+
+# GNU Radio / RTL-SDR decoder — install via radioconda, NOT pip:
+#   conda install -c conda-forge gnuradio-lora_sdr
+# gnuradio and lora_sdr are not pip-installable on Windows
