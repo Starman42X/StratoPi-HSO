@@ -23,7 +23,7 @@
 <body>
 <div id="wait">
   <div style="font-size:2rem">📡</div>
-  <div>Waiting for HAB position…</div>
+  <div id="wait-msg">Connecting…</div>
 </div>
 <div id="map"></div>
 <script>
@@ -60,10 +60,15 @@
   }
 
   async function poll(){
+    const msg = document.getElementById('wait-msg');
     try{
       const d = await fetch('/api/state').then(r => r.json());
+      if(msg) msg.textContent = (d.latest && d.latest.lat != null)
+        ? 'Receiving telemetry…' : 'Connected — waiting for HAB position…';
       update(d);
-    }catch(e){}
+    }catch(e){
+      if(msg) msg.textContent = 'Cannot reach ground station API — check PC firewall / port 80 or 443';
+    }
   }
   poll();
   setInterval(poll, 2000);

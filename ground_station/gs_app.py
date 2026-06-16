@@ -21,7 +21,7 @@ import re
 import argparse
 import logging
 from datetime import datetime
-from flask import Flask, redirect, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request
 
 from alerts import AltitudeAlerts, DEFAULT_MILESTONES, reset_triggered
 from bundle_paths import app_dir, is_frozen, templates_dir
@@ -44,6 +44,7 @@ from pi_link import (
     pi_request as pi_link_request,
     pi_url_candidates,
 )
+from tesla_host import start_tesla_servers
 from whereami_host import get_network_status, start_whereami_host, stop_whereami_host
 
 logging.basicConfig(
@@ -458,14 +459,27 @@ def _auto_detect_serial() -> str | None:
 #  Flask routes
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _is_hotspot_viewer() -> bool:
+    """PC hotspot clients (Tesla browser, phones) — no mDNS, often port 80 only."""
+    host = (request.host or "").split(":")[0].lower()
+    remote = (request.remote_addr or "").split("%")[0]
+    if host in ("whereami", "whereami.local"):
+        return True
+    if host.startswith("192.168.137."):
+        return True
+    # In-car browser on hotspot Wi‑Fi (client IP 192.168.137.x)
+    if remote.startswith("192.168.137.") and remote != "192.168.137.1":
+        return True
+    return False
+
+
 @app.before_request
-def _whereami_viewer_redirect():
-    """Phones on PC hotspot (whereami.local) get map-only, not the operator UI."""
+def _hotspot_viewer_root():
+    """Serve map at / for hotspot — Tesla rejects redirects and non‑standard ports."""
     if request.path != "/" or request.method != "GET":
         return None
-    host = (request.host or "").split(":")[0].lower()
-    if host in ("whereami", "whereami.local") or host.startswith("192.168.137."):
-        return redirect("/whereami")
+    if _is_hotspot_viewer():
+        return render_template("map_viewer.html")
     return None
 
 
@@ -475,9 +489,16 @@ def index():
 
 
 @app.route("/whereami")
+@app.route("/tesla")
 def whereami_viewer():
-    """Map-only page for phones on the PC hotspot (whereami.local)."""
+    """Map-only page for hotspot clients (Tesla browser, phones)."""
     return render_template("map_viewer.html")
+
+
+@app.route("/api/tesla/ping")
+def api_tesla_ping():
+    """Connectivity check from Tesla browser."""
+    return jsonify({"ok": True, "viewer": "stratopi-map"})
 
 
 @app.route("/api/state")
@@ -873,6 +894,14 @@ def api_alerts_sync_pi():
 #  Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _run_app(primary_port: int) -> None:
+    from werkzeug.serving import make_server
+
+    log.info("Ground Control: http://localhost:%d", primary_port)
+    srv = make_server("0.0.0.0", primary_port, app, threaded=True)
+    srv.serve_forever()
+
+
 def main():
     parser = argparse.ArgumentParser(description="StratoPi HSO Ground Station")
     parser.add_argument("--serial", "-s", metavar="PORT",
@@ -890,6 +919,8 @@ def main():
                         help="Drive E22 M1 via USB adapter RTS (if DTR not wired)")
     parser.add_argument("--no-hotspot", action="store_true",
                         help="Do not start Windows Wi‑Fi hotspot / whereami.local mDNS")
+    parser.add_argument("--no-tesla-ports", action="store_true",
+                        help="Do not listen on 80/443 for Tesla hotspot map")
     args = parser.parse_args()
 
     global _serial_use_dtr, _serial_use_rts
@@ -920,16 +951,22 @@ def main():
     if not args.no_hotspot:
         try:
             net = start_whereami_host(args.port, hotspot=True)
-            for url in net.get("viewer_urls", net.get("urls", [])):
-                log.info("Share map (phones): %s", url)
+            for url in net.get("viewer_urls", net.get("urls", []))[:5]:
+                log.info("Share map: %s", url)
         except Exception as e:
             log.warning("whereami.local host setup failed: %s", e)
 
     if is_frozen():
         log.info("StratoPi Ground Station %s", app_dir())
-    log.info("Ground Control: http://localhost:%d", args.port)
+
     try:
-        app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
+        if not args.no_tesla_ports:
+            ti = start_tesla_servers(app, args.port)
+            if not ti.get("firewall_ok"):
+                log.warning(
+                    "Tesla firewall incomplete — use run_ground_control_tesla.ps1 as Administrator"
+                )
+        _run_app(args.port)
     finally:
         stop_whereami_host()
 

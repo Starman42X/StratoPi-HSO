@@ -1,4 +1,4 @@
-"""Windows Wi‑Fi hotspot + mDNS — phones open http://whereami.local:PORT/whereami (map only)."""
+"""Windows Wi‑Fi hotspot + map share — Tesla: http://192.168.137.1/  phones: .local or IP."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ _hotspot_state: dict[str, Any] = {
     "hotspot_ip": None,
     "urls": [],
     "viewer_urls": [],
+    "tesla_url": None,
+    "tesla_https_url": None,
     "ips": [],
 }
 
@@ -179,30 +181,39 @@ def _mdns_publish_targets() -> tuple[list[str], Any, str | None]:
     return [], InterfaceChoice.All, "no LAN IP"
 
 
-def _build_urls(port: int) -> tuple[list[str], list[str]]:
+def _build_urls(port: int) -> tuple[list[str], list[str], str | None, str | None]:
     ips = _local_ips()
-    hotspot = _hotspot_gateway_ip()
-    if hotspot and hotspot not in ips:
+    hotspot = _hotspot_gateway_ip() or "192.168.137.1"
+    if hotspot not in ips:
         ips.insert(0, hotspot)
 
     viewer_urls: list[str] = []
     all_urls: list[str] = []
     seen: set[str] = set()
 
-    def add_viewer(base: str) -> None:
-        u = f"{base}:{port}{_VIEWER_PATH}"
-        if u not in seen:
-            seen.add(u)
-            viewer_urls.append(u)
+    def add(url: str) -> None:
+        if url not in seen:
+            seen.add(url)
+            viewer_urls.append(url)
 
-    # Prefer direct IP first (always works); mDNS name second.
+    # Tesla HW4: HTTPS :443 first, then HTTP :80 — never :8080 or .local
+    tesla_https = f"https://{hotspot}/"
+    tesla_url = f"http://{hotspot}/"
+    add(tesla_https)
+    add(tesla_url)
+    add(f"https://{hotspot}/whereami")
+    add(f"http://{hotspot}/whereami")
+    add(f"http://{hotspot}:{port}{_VIEWER_PATH}")
+    add(f"http://{_HOSTNAME}.local:{port}{_VIEWER_PATH}")
+
     for ip in ips:
-        add_viewer(f"http://{ip}")
-    add_viewer(f"http://{_HOSTNAME}.local")
+        if ip == hotspot:
+            continue
+        add(f"http://{ip}:{port}{_VIEWER_PATH}")
 
     for u in viewer_urls:
         all_urls.append(u)
-    return all_urls, viewer_urls
+    return all_urls, viewer_urls, tesla_url, tesla_https
 
 
 def _stop_mdns() -> None:
@@ -277,10 +288,20 @@ def _start_mdns(port: int) -> bool:
 def _ensure_firewall_rules(port: int) -> None:
     if platform.system() != "Windows":
         return
+    tcp_ports = sorted({port, 80, 443})
+    tcp_rules = []
+    for p in tcp_ports:
+        tcp_rules.append(
+            f"  @{{ Name='StratoPi TCP {p}'; Proto='TCP'; Port={p}; Remote=$null }},"
+        )
+        tcp_rules.append(
+            f"  @{{ Name='StratoPi Hotspot TCP {p}'; Proto='TCP'; Port={p}; "
+            f"Remote='192.168.137.0/24' }},"
+        )
+    tcp_block = "`n".join(tcp_rules)
     ps = f"""
 $rules = @(
-  @{{ Name='StratoPi Ground Control {port}'; Proto='TCP'; Port={port}; Remote=$null }},
-  @{{ Name='StratoPi Hotspot {port}'; Proto='TCP'; Port={port}; Remote='192.168.137.0/24' }},
+{tcp_block}
   @{{ Name='StratoPi mDNS UDP'; Proto='UDP'; Port=5353; Remote=$null }},
   @{{ Name='StratoPi mDNS hotspot'; Proto='UDP'; Port=5353; Remote='192.168.137.0/24' }}
 )
@@ -351,11 +372,13 @@ Write-Output 'STARTED'
 
 
 def _refresh_state(port: int) -> dict[str, Any]:
-    urls, viewer_urls = _build_urls(port)
+    urls, viewer_urls, tesla_url, tesla_https = _build_urls(port)
     _hotspot_state["ips"] = _local_ips()
     _hotspot_state["hotspot_ip"] = _hotspot_gateway_ip()
     _hotspot_state["urls"] = urls
     _hotspot_state["viewer_urls"] = viewer_urls
+    _hotspot_state["tesla_url"] = tesla_url
+    _hotspot_state["tesla_https_url"] = tesla_https
     return dict(_hotspot_state)
 
 
@@ -379,7 +402,7 @@ def _mdns_refresh_loop(port: int) -> None:
 
 
 def start_whereami_host(port: int, *, hotspot: bool = True) -> dict[str, Any]:
-    """Start hotspot + mDNS for map-only viewer at /whereami."""
+    """Start hotspot + mDNS; Tesla uses https://192.168.137.1/ (not :8080)."""
     if platform.system() == "Windows":
         _ensure_firewall_rules(port)
 
@@ -407,9 +430,14 @@ def start_whereami_host(port: int, *, hotspot: bool = True) -> dict[str, Any]:
     st = _refresh_state(port)
     for u in st.get("viewer_urls", []):
         log.info("Map viewer: %s", u)
+    if _hotspot_state.get("tesla_https_url"):
+        log.info("Tesla browser: %s", _hotspot_state["tesla_https_url"])
+    elif _hotspot_state.get("tesla_url"):
+        log.info("Tesla browser: %s", _hotspot_state["tesla_url"])
     if not _hotspot_state["mdns_ok"] and _hotspot_state.get("hotspot_ok"):
         log.info(
-            "mDNS pending — if whereami.local fails on phone, use http://%s:%d%s",
+            "mDNS pending — use http://%s/ for Tesla, or http://%s:%d%s for phones",
+            _hotspot_state.get("hotspot_ip") or "192.168.137.1",
             _hotspot_state.get("hotspot_ip") or "192.168.137.1",
             port,
             _VIEWER_PATH,

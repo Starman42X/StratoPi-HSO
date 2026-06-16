@@ -624,7 +624,8 @@
       const n = await fetch('/api/network').then(r=>r.json());
       const chip = document.getElementById('share-chip');
       const hint = document.getElementById('share-url-hint');
-      const url = (n.viewer_urls && n.viewer_urls[0]) || (n.urls && n.urls[0]) || '';
+      const tesla = n.tesla_https_url || n.tesla_url || '';
+      const url = tesla || (n.viewer_urls && n.viewer_urls[0]) || (n.urls && n.urls[0]) || '';
       if(url){
         chip.style.display = '';
         chip.textContent = '📶 ' + url.replace(/^https?:\/\//,'');
@@ -632,7 +633,8 @@
         chip.title = (n.viewer_urls || n.urls || []).join('\n');
         hint.style.display = '';
         const hip = n.hotspot_ip ? ' (hotspot ' + n.hotspot_ip + ')' : '';
-        hint.textContent = 'Phones on PC hotspot — map only: ' + url + hip;
+        hint.textContent = 'Tesla (hotspot): ' + (n.tesla_https_url || n.tesla_url || url)
+          + ' — not :8080 or .local' + hip;
       }
     }catch(e){}
   }
