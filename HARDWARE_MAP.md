@@ -97,20 +97,39 @@ Shares the **same I2C bus** as the AHT21 (parallel SDA/SCL).
 > The PMS TX idle level is 3.3 V — safe for the Pi. Do **not** feed the 5 V VCC
 > into a GPIO.
 
-### DS18B20 ×3 — 1-Wire, GPIO4
-All three probes share the one data line (1-Wire is a bus).
-| DS18B20 | → Pi |
+### DS18B20 ×3 — TWO separate 1-Wire buses
+The cell probe and the env probes are on **different GPIOs / different buses** so
+they can't interfere with each other. Each bus needs its **own 4.7 kΩ pull-up**
+to 3V3 on its data line.
+
+**Bus 1 — CELL probe (GPIO4 / pin 7):**
+| DS18B20 (cell) | → Pi |
 |---|---|
 | VDD | 3V3 |
 | GND | GND |
-| DATA | GPIO4 / pin 7 |
-| — | **4.7 kΩ pull-up** from DATA to 3V3 (one resistor for the whole bus) |
+| DATA | **GPIO4 / pin 7** |
+| pull-up | 4.7 kΩ DATA → 3V3 |
 
-Roles (logged as `DS_cell`, `DS_env1`, `DS_env2`):
-- **Cell** = `28-000000bf78cc` — **pinned by ROM id** in code; used by the heater PID.
-  This pinning matters: with 3 probes, relying on glob order could silently make
-  an env probe the heater's input.
-- **Env1 / Env2** = the other two probes (any id), ambient temperatures.
+**Bus 2 — the TWO ENV probes (GPIO17 / pin 11):**
+| DS18B20 (env1, env2) | → Pi |
+|---|---|
+| VDD | 3V3 |
+| GND | GND |
+| DATA | **GPIO17 / pin 11** (both env probes share this line) |
+| pull-up | 4.7 kΩ DATA → 3V3 |
+
+Enabled by two overlays in `config.txt`:
+`dtoverlay=w1-gpio,gpiopin=4` and `dtoverlay=w1-gpio,gpiopin=17` (reboot required).
+
+Roles (logged as `DS_cell`, `DS_env1`, `DS_env2`) — identified **by port**, no ID
+tracking needed:
+- **Cell** = the probe **alone on the GPIO4 bus**; drives the heater PID.
+- **Env1 / Env2** = the **two probes on the GPIO17 bus**.
+
+`sensors.classify_ds18b20()` picks the cell as the lone probe on its own bus and
+env as the pair on the other bus, so you just wire "cell on its own port, the two
+env on the shared port" — the code figures out the rest. (Before the env bus is
+wired, it falls back to the pinned id `28-000000bf78cc`, then to first-probe.)
 
 ### GPS — Matek SAM-M10Q (u-blox), UART5, **9600 baud**
 | GPS | → Pi |

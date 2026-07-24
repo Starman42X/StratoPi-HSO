@@ -22,7 +22,6 @@ a = Analysis(
         'lora_downlink',
         'pi_link',
         'whereami_host',
-        'tesla_host',
         'zeroconf',
         'e22_serial',
         'cryptography.hazmat.primitives.ciphers.aead',

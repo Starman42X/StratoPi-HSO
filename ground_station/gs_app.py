@@ -44,7 +44,6 @@ from pi_link import (
     pi_request as pi_link_request,
     pi_url_candidates,
 )
-from tesla_host import start_tesla_servers
 from whereami_host import get_network_status, start_whereami_host, stop_whereami_host
 
 logging.basicConfig(
@@ -460,14 +459,13 @@ def _auto_detect_serial() -> str | None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _is_hotspot_viewer() -> bool:
-    """PC hotspot clients (Tesla browser, phones) — no mDNS, often port 80 only."""
+    """PC hotspot clients (phones) — map-only, not the operator UI."""
     host = (request.host or "").split(":")[0].lower()
     remote = (request.remote_addr or "").split("%")[0]
     if host in ("whereami", "whereami.local"):
         return True
     if host.startswith("192.168.137."):
         return True
-    # In-car browser on hotspot Wi‑Fi (client IP 192.168.137.x)
     if remote.startswith("192.168.137.") and remote != "192.168.137.1":
         return True
     return False
@@ -475,7 +473,7 @@ def _is_hotspot_viewer() -> bool:
 
 @app.before_request
 def _hotspot_viewer_root():
-    """Serve map at / for hotspot — Tesla rejects redirects and non‑standard ports."""
+    """Phones on PC hotspot get map-only at /."""
     if request.path != "/" or request.method != "GET":
         return None
     if _is_hotspot_viewer():
@@ -489,16 +487,9 @@ def index():
 
 
 @app.route("/whereami")
-@app.route("/tesla")
 def whereami_viewer():
-    """Map-only page for hotspot clients (Tesla browser, phones)."""
+    """Map-only page for phones on the PC hotspot."""
     return render_template("map_viewer.html")
-
-
-@app.route("/api/tesla/ping")
-def api_tesla_ping():
-    """Connectivity check from Tesla browser."""
-    return jsonify({"ok": True, "viewer": "stratopi-map"})
 
 
 @app.route("/api/state")
@@ -854,6 +845,52 @@ def api_lora_downlink_ping():
     return jsonify({"ok": True, **result})
 
 
+@app.route("/api/pi/cameras", methods=["GET"])
+def api_pi_cameras_get():
+    """Pi camera status + current resolution/fps settings."""
+    data, err = _pi_request("/api/status", timeout=10)
+    if err:
+        return jsonify({"ok": False, **err}), 502
+    return jsonify({
+        "ok": True,
+        "pi_url": _pi_url(),
+        "recording": data.get("recording"),
+        "restarting_recording": data.get("restarting_recording"),
+        "streaming": data.get("streaming"),
+        "mode": data.get("mode"),
+        "hq_cam_available": data.get("hq_cam_available"),
+        "usb_cam_available": data.get("usb_cam_available"),
+        "usb_cam_device": data.get("usb_cam_device"),
+        "settings": data.get("settings"),
+    })
+
+
+@app.route("/api/pi/cameras/settings", methods=["POST"])
+def api_pi_cameras_settings_post():
+    """Push HQ + USB resolution/fps to Pi (same as Pi controller Save Settings)."""
+    patch = request.get_json(force=True, silent=True) or {}
+    body: dict = {}
+    if "hq_cam" in patch:
+        body["hq_cam"] = {
+            k: patch["hq_cam"][k]
+            for k in ("width", "height", "fps")
+            if k in patch["hq_cam"]
+        }
+    if "usb_cam" in patch:
+        body["usb_cam"] = {
+            k: patch["usb_cam"][k]
+            for k in ("width", "height", "fps", "prioritize_fps")
+            if k in patch["usb_cam"]
+        }
+    if not body:
+        return jsonify({"ok": False, "error": "hq_cam and/or usb_cam required"}), 400
+    data, err = _pi_request("/api/settings", "POST", body, timeout=10)
+    if err:
+        code = 400 if err.get("error") else 502
+        return jsonify({"ok": False, **err}), code
+    return jsonify({"ok": True, "pi_url": _pi_url(), **data})
+
+
 @app.route("/api/pi/link")
 def api_pi_link():
     status = pi_link_status()
@@ -894,14 +931,6 @@ def api_alerts_sync_pi():
 #  Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _run_app(primary_port: int) -> None:
-    from werkzeug.serving import make_server
-
-    log.info("Ground Control: http://localhost:%d", primary_port)
-    srv = make_server("0.0.0.0", primary_port, app, threaded=True)
-    srv.serve_forever()
-
-
 def main():
     parser = argparse.ArgumentParser(description="StratoPi HSO Ground Station")
     parser.add_argument("--serial", "-s", metavar="PORT",
@@ -919,8 +948,6 @@ def main():
                         help="Drive E22 M1 via USB adapter RTS (if DTR not wired)")
     parser.add_argument("--no-hotspot", action="store_true",
                         help="Do not start Windows Wi‑Fi hotspot / whereami.local mDNS")
-    parser.add_argument("--no-tesla-ports", action="store_true",
-                        help="Do not listen on 80/443 for Tesla hotspot map")
     args = parser.parse_args()
 
     global _serial_use_dtr, _serial_use_rts
@@ -959,14 +986,9 @@ def main():
     if is_frozen():
         log.info("StratoPi Ground Station %s", app_dir())
 
+    log.info("Ground Control: http://localhost:%d", args.port)
     try:
-        if not args.no_tesla_ports:
-            ti = start_tesla_servers(app, args.port)
-            if not ti.get("firewall_ok"):
-                log.warning(
-                    "Tesla firewall incomplete — use run_ground_control_tesla.ps1 as Administrator"
-                )
-        _run_app(args.port)
+        app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
     finally:
         stop_whereami_host()
 

@@ -7,6 +7,8 @@ venv/
 # Ground station local state (copy from *.example on new laptop)
 ground_station/gs_alerts.json
 ground_station/lora_crypto.json
+ground_station/tesla_hotspot.crt
+ground_station/tesla_hotspot.key
 lora_crypto.json
 
 # Build / portable output

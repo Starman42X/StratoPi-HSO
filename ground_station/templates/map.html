@@ -240,7 +240,9 @@
         <input type="checkbox" id="cfg-economy" checked>
       </div>
       <p style="font-size:.72rem;color:#484f58;margin-bottom:6px">
-        Check altitudes for alerts. Pi sends one <b>diagnostic</b> packet at each milestone.
+        Check altitudes for alerts. Pi sends one <b>diagnostic</b> packet at each milestone
+        and saves <b>checkpoint photos</b> from both cameras while mission capture is running.
+        Use <b>Sync to Pi</b> before launch so checkpoints match.
       </p>
       <div class="alt-grid" id="milestone-grid"></div>
       <div class="btn-row">
@@ -282,6 +284,68 @@
         <button class="btn primary" id="btn-crypto-sync">Sync key to Pi</button>
       </div>
       <p class="sig-hint" id="crypto-status">Checking Pi connection…</p>
+    </div>
+
+    <!-- Pi cameras -->
+    <div class="panel">
+      <h3>Pi cameras</h3>
+      <p class="sig-hint" style="margin-bottom:8px">
+        Set HQ + USB resolution and FPS on the Pi over Wi‑Fi.
+        Same presets as the Pi controller. While recording, saving stops capture,
+        remuxes the current video to .mp4, and starts a new file at the new settings.
+      </p>
+      <div class="kv">
+        <span class="kv-key">Pi status</span>
+        <span class="kv-val" id="cam-pi-status">—</span>
+      </div>
+      <p style="font-size:.72rem;color:#8b949e;margin:10px 0 4px">Pi HQ Camera (IMX477)</p>
+      <select id="cam-hq-mode" class="full" onchange="applyCamHqMode()">
+        <optgroup label="H264 — hardware encoded">
+          <option value="1332,990,120">1332×990 · up to 120 fps · cropped</option>
+          <option value="1920,1080,60" selected>1920×1080 · up to 60 fps · 16:9 ★</option>
+        </optgroup>
+        <optgroup label="MJPEG — larger files">
+          <option value="2028,1080,74">2028×1080 · up to 74 fps · 16:9 binned</option>
+          <option value="2028,1520,53">2028×1520 · up to 53 fps · full FOV binned</option>
+          <option value="4056,2160,19">4056×2160 · up to 19 fps · 4K</option>
+          <option value="4056,3040,14">4056×3040 · up to 14 fps · full 12 MP</option>
+        </optgroup>
+      </select>
+      <label style="display:block;font-size:.72rem;color:#8b949e;margin:8px 0 4px">
+        FPS <span id="cam-hq-fps-hint" style="color:#f0883e"></span>
+      </label>
+      <input type="number" id="cam-hq-fps" value="30" min="1" max="120" step="1" class="full"
+             style="width:100%;padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6edf3">
+      <input type="hidden" id="cam-hq-width" value="1920">
+      <input type="hidden" id="cam-hq-height" value="1080">
+
+      <p style="font-size:.72rem;color:#8b949e;margin:12px 0 4px">USB Webcam (MJPEG)</p>
+      <select id="cam-usb-mode" class="full" onchange="applyCamUsbMode()">
+        <option value="3264,2448,15">3264×2448 · 15 fps · 8 MP</option>
+        <option value="2592,1944,15">2592×1944 · 15 fps · 5 MP</option>
+        <option value="2048,1536,15">2048×1536 · 15 fps · 3.1 MP</option>
+        <option value="1920,1080,25" selected>1920×1080 · 25 fps · 1080p ★</option>
+        <option value="1600,1200,15">1600×1200 · 15 fps</option>
+        <option value="1280,960,15">1280×960 · 15 fps</option>
+        <option value="1280,720,25">1280×720 · 25 fps · 720p</option>
+        <option value="800,600,15">800×600 · 15 fps</option>
+        <option value="640,480,15">640×480 · 15 fps</option>
+      </select>
+      <input type="hidden" id="cam-usb-width" value="1920">
+      <input type="hidden" id="cam-usb-height" value="1080">
+      <input type="hidden" id="cam-usb-fps" value="25">
+      <div style="margin-top:10px;display:flex;align-items:flex-start;gap:8px">
+        <input type="checkbox" id="cam-usb-prioritize-fps" checked
+               style="margin-top:3px;width:auto;accent-color:#58a6ff;cursor:pointer">
+        <label for="cam-usb-prioritize-fps" style="font-size:.78rem;color:#8b949e;cursor:pointer">
+          USB: prioritize FPS over exposure (holds target fps; darker in low light)
+        </label>
+      </div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn primary" id="btn-cam-save">Send to Pi</button>
+        <button class="btn" id="btn-cam-refresh" type="button">Refresh</button>
+      </div>
+      <p class="sig-hint" id="cam-save-status">Connect Pi Wi‑Fi to load settings.</p>
     </div>
 
     <!-- LoRa radio help -->
@@ -624,8 +688,7 @@
       const n = await fetch('/api/network').then(r=>r.json());
       const chip = document.getElementById('share-chip');
       const hint = document.getElementById('share-url-hint');
-      const tesla = n.tesla_https_url || n.tesla_url || '';
-      const url = tesla || (n.viewer_urls && n.viewer_urls[0]) || (n.urls && n.urls[0]) || '';
+      const url = (n.viewer_urls && n.viewer_urls[0]) || (n.urls && n.urls[0]) || '';
       if(url){
         chip.style.display = '';
         chip.textContent = '📶 ' + url.replace(/^https?:\/\//,'');
@@ -633,8 +696,7 @@
         chip.title = (n.viewer_urls || n.urls || []).join('\n');
         hint.style.display = '';
         const hip = n.hotspot_ip ? ' (hotspot ' + n.hotspot_ip + ')' : '';
-        hint.textContent = 'Tesla (hotspot): ' + (n.tesla_https_url || n.tesla_url || url)
-          + ' — not :8080 or .local' + hip;
+        hint.textContent = 'Phones on PC hotspot — map only: ' + url + hip;
       }
     }catch(e){}
   }
@@ -774,6 +836,162 @@
     st.textContent = 'Key synced to ' + (r.sync.pi_url || 'Pi');
     st.style.color = '#3fb950';
   }
+
+  // ── Pi camera settings (same presets as Pi controller) ─────────────────────
+
+  let camSettingsLoaded = false;
+
+  function applyCamHqMode(){
+    const sel = document.getElementById('cam-hq-mode');
+    const [w, h, maxFps] = sel.value.split(',').map(Number);
+    document.getElementById('cam-hq-width').value = w;
+    document.getElementById('cam-hq-height').value = h;
+    const fpsEl = document.getElementById('cam-hq-fps');
+    if(parseInt(fpsEl.value, 10) > maxFps) fpsEl.value = maxFps;
+    fpsEl.max = maxFps;
+    document.getElementById('cam-hq-fps-hint').textContent = `(max ${maxFps} for this mode)`;
+  }
+
+  function syncCamHqModeSelector(w, h){
+    const sel = document.getElementById('cam-hq-mode');
+    for(const opt of sel.options){
+      const [ow, oh] = opt.value.split(',').map(Number);
+      if(ow === w && oh === h){ sel.value = opt.value; break; }
+    }
+    applyCamHqMode();
+  }
+
+  function applyCamUsbMode(){
+    const sel = document.getElementById('cam-usb-mode');
+    const [w, h, fps] = sel.value.split(',').map(Number);
+    document.getElementById('cam-usb-width').value = w;
+    document.getElementById('cam-usb-height').value = h;
+    document.getElementById('cam-usb-fps').value = fps;
+  }
+
+  function syncCamUsbModeSelector(w, h, fps){
+    const sel = document.getElementById('cam-usb-mode');
+    for(const opt of sel.options){
+      const [ow, oh, ofps] = opt.value.split(',').map(Number);
+      if(ow === w && oh === h && ofps === fps){ sel.value = opt.value; break; }
+    }
+    applyCamUsbMode();
+  }
+
+  function updateCamPiStatus(d){
+    const el = document.getElementById('cam-pi-status');
+    if(!d || !d.ok){
+      el.textContent = 'Unreachable';
+      el.className = 'kv-val red';
+      return;
+    }
+    const parts = [];
+    if(d.restarting_recording) parts.push('Saving video + restarting…');
+    else if(d.recording) parts.push((d.mode === 'mission' ? 'MISSION' : 'Test') + ' recording');
+    else if(d.streaming) parts.push('Live view');
+    else parts.push('Idle');
+    if(d.hq_cam_available === false) parts.push('HQ missing');
+    if(d.usb_cam_available === false) parts.push('USB missing');
+    el.textContent = parts.join(' · ');
+    el.className = 'kv-val ' + (d.restarting_recording ? 'orange' : d.recording ? 'orange' : 'green');
+    document.getElementById('btn-cam-save').disabled = !!d.restarting_recording;
+  }
+
+  async function loadPiCameras(force){
+    const st = document.getElementById('cam-save-status');
+    try{
+      const d = await fetch('/api/pi/cameras').then(r=>r.json());
+      updateCamPiStatus(d);
+      if(!d.ok){
+        st.textContent = d.error || 'Pi unreachable — join Wi‑Fi or Strato-HSO hotspot.';
+        st.style.color = '#f85149';
+        return;
+      }
+      if((!camSettingsLoaded || force) && d.settings){
+        const s = d.settings;
+        syncCamHqModeSelector(s.hq_cam.width, s.hq_cam.height);
+        document.getElementById('cam-hq-fps').value = s.hq_cam.fps;
+        syncCamUsbModeSelector(s.usb_cam.width, s.usb_cam.height, s.usb_cam.fps);
+        document.getElementById('cam-usb-prioritize-fps').checked = s.usb_cam.prioritize_fps !== false;
+        camSettingsLoaded = true;
+      }
+      st.textContent = d.restarting_recording
+        ? 'Pi is saving the current video and restarting capture…'
+        : d.recording
+          ? 'Recording — Send to Pi will save current video and start new capture.'
+          : 'Loaded from Pi — edit and Send to Pi.';
+      st.style.color = (d.restarting_recording || d.recording) ? '#f0883e' : '#8b949e';
+    }catch(e){
+      st.textContent = 'Failed to load Pi camera settings.';
+      st.style.color = '#f85149';
+    }
+  }
+
+  async function savePiCameras(){
+    const st = document.getElementById('cam-save-status');
+    const btn = document.getElementById('btn-cam-save');
+    const body = {
+      hq_cam: {
+        width: parseInt(document.getElementById('cam-hq-width').value, 10),
+        height: parseInt(document.getElementById('cam-hq-height').value, 10),
+        fps: parseInt(document.getElementById('cam-hq-fps').value, 10),
+      },
+      usb_cam: {
+        width: parseInt(document.getElementById('cam-usb-width').value, 10),
+        height: parseInt(document.getElementById('cam-usb-height').value, 10),
+        fps: parseInt(document.getElementById('cam-usb-fps').value, 10),
+        prioritize_fps: document.getElementById('cam-usb-prioritize-fps').checked,
+      },
+    };
+    st.textContent = 'Sending to Pi…';
+    st.style.color = '#f0883e';
+    btn.disabled = true;
+    try{
+      const r = await fetch('/api/pi/cameras/settings', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      }).then(res => res.json());
+      if(!r.ok){
+        st.textContent = r.error || 'Save failed';
+        st.style.color = '#f85149';
+        btn.disabled = false;
+        return;
+      }
+      if(r.restarting_recording){
+        st.textContent = 'Pi saving video and restarting capture at new resolution…';
+        st.style.color = '#f0883e';
+        btn.disabled = true;
+        const pollId = setInterval(async () => {
+          const stt = await fetch('/api/pi/cameras').then(x => x.json());
+          updateCamPiStatus(stt);
+          if(stt.ok && !stt.restarting_recording && stt.recording){
+            clearInterval(pollId);
+            btn.disabled = false;
+            document.getElementById('cam-save-status').textContent =
+              'New capture started — HQ ' + body.hq_cam.width + '×' + body.hq_cam.height + '@' + body.hq_cam.fps
+              + ' · USB ' + body.usb_cam.width + '×' + body.usb_cam.height + '@' + body.usb_cam.fps;
+            document.getElementById('cam-save-status').style.color = '#3fb950';
+          }
+        }, 2000);
+        camSettingsLoaded = true;
+        return;
+      }
+      st.textContent = 'Saved on Pi — HQ '
+        + body.hq_cam.width + '×' + body.hq_cam.height + '@' + body.hq_cam.fps
+        + ' · USB ' + body.usb_cam.width + '×' + body.usb_cam.height + '@' + body.usb_cam.fps;
+      st.style.color = '#3fb950';
+      camSettingsLoaded = true;
+      loadPiCameras(true);
+    }catch(e){
+      st.textContent = 'Network error sending to Pi.';
+      st.style.color = '#f85149';
+      btn.disabled = false;
+    }
+  }
+
+  applyCamHqMode();
+  applyCamUsbMode();
 
   async function pollCryptoCheck(){
     try{
@@ -1047,6 +1265,8 @@
   document.getElementById('btn-reset-alerts').onclick = resetAlerts;
   document.getElementById('cfg-crypto-enabled').onchange = saveCryptoEnabled;
   document.getElementById('btn-crypto-sync').onclick = syncCryptoToPi;
+  document.getElementById('btn-cam-save').onclick = savePiCameras;
+  document.getElementById('btn-cam-refresh').onclick = () => loadPiCameras(true);
 
   if('Notification' in window && Notification.permission === 'default'){
     Notification.requestPermission();
@@ -1054,12 +1274,14 @@
   loadAlertConfig();
   loadCryptoConfig();
   pollCryptoCheck();
+  loadPiCameras(false);
 
   poll();
   pollNetwork();
   setInterval(poll, 2000);
   setInterval(pollAlerts, 3000);
   setInterval(pollCryptoCheck, 15000);
+  setInterval(() => loadPiCameras(false), 20000);
   setInterval(pollNetwork, 30000);
 </script>
 </body>

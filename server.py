@@ -49,6 +49,8 @@ _rec_log_dir     = None
 _rec_prefix      = None
 _rec_restart     = {'hq': 0, 'usb': 0}
 _MAX_REC_RESTART = 30        # backstop against a restart storm (bad device)
+_rec_hq_files    = []        # all HQ raw outputs this session (base + watchdog segments)
+_rec_hq_fps      = 30        # fps used for the remux step
 
 
 def _segment_path(orig, seg):
@@ -58,16 +60,78 @@ def _segment_path(orig, seg):
     return str(p.with_name(f"{p.stem}_p{seg}{p.suffix}"))
 
 
+def _probe_fps(raw, default=30.0):
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(raw)],
+            capture_output=True, text=True, timeout=10)
+        v = r.stdout.strip()
+        if "/" in v:
+            n, d = v.split("/")
+            if float(d):
+                return float(n) / float(d)
+    except Exception:
+        pass
+    return default
+
+
+def _remux_raw_to_mp4(raw, fps):
+    """rpicam-vid writes a RAW .h264/.mjpeg elementary stream — no container and
+    no timing, so most players show only the first frame. Wrap it into a proper
+    .mp4 with the correct framerate (stream copy, no re-encode). Returns the .mp4
+    path on success and deletes the raw; keeps the raw on failure."""
+    raw = Path(raw)
+    if not raw.exists() or raw.stat().st_size == 0:
+        return None
+    try:
+        fps = float(fps) if fps else 30.0
+    except Exception:
+        fps = 30.0
+    mp4 = raw.with_suffix(".mp4")
+    cmd = ["ffmpeg", "-y"]
+    if raw.suffix == ".mjpeg":
+        cmd += ["-f", "mjpeg"]
+    cmd += ["-r", str(fps), "-i", str(raw), "-c:v", "copy", str(mp4)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=900)
+        if r.returncode == 0 and mp4.exists() and mp4.stat().st_size > 0:
+            try:
+                raw.unlink()
+            except Exception:
+                pass
+            print(f"[remux] {raw.name} -> {mp4.name}")
+            return str(mp4)
+        print(f"[remux] FAILED {raw.name}: {r.stderr.decode(errors='replace')[-200:]}")
+    except Exception as e:
+        print(f"[remux] error {raw.name}: {e}")
+    return None
+
+
+def _remux_hq_outputs(files, fps):
+    for f in list(files):
+        if f and (str(f).endswith(".h264") or str(f).endswith(".mjpeg")):
+            _remux_raw_to_mp4(f, fps)
+
+
+def _remux_orphans():
+    """On boot, remux any RAW camera files left by a crashed/killed session
+    (power-loss flight) so they still yield playable videos."""
+    for raw in glob.glob(str(CAPTURES_DIR / "*hq*.h264")) + \
+               glob.glob(str(CAPTURES_DIR / "*hq*.mjpeg")):
+        if not Path(raw).with_suffix(".mp4").exists():
+            _remux_raw_to_mp4(raw, _probe_fps(raw))
+
+
 # ── DS18B20 temperature ───────────────────────────────────────────
 
 _TEMP_MAX = 120          # 10 min of history at 5 s per sample
 _temp_history = []       # [{"ts": float, "c": float}, ...]
 
-# The CELL temperature probe is pinned by its 1-wire ROM id so the heater PID
-# always controls off the right sensor. With 3× DS18B20 on the bus (cell + 2
-# env), relying on glob order would be a latent bug: a newly-enumerated env probe
-# could sort first and silently become the heater's input. The 2 env probes are
-# logged separately by sensors.py.
+# The CELL temperature probe is identified BY PORT: it sits alone on its own
+# 1-Wire bus (GPIO4) while the 2 env probes share the other bus (GPIO17). See
+# sensors.classify_ds18b20(). This ROM id is only a single-bus fallback (used
+# before the env bus is wired) so the heater never controls off an env probe.
 CELL_DS18B20_ID = "28-000000bf78cc"
 
 
@@ -97,11 +161,21 @@ def read_ds18b20(retries=3):
                   first conversion completed)
     Retries a few times because most 1-wire glitches are transient.
     """
-    cell = f"/sys/bus/w1/devices/{CELL_DS18B20_ID}/w1_slave"
-    if os.path.exists(cell):
+    # Identify the cell probe BY PORT (it sits alone on its own 1-Wire bus, GPIO4)
+    # via sensors.classify_ds18b20(); lazy import avoids module load-order issues.
+    cell = None
+    try:
+        import sensors as _sensors_mod
+        cell = _sensors_mod.cell_sensor_path()
+    except Exception:
+        cell = None
+    if cell and os.path.exists(cell):
         sensors = [cell]
     else:
-        sensors = glob.glob("/sys/bus/w1/devices/28-*/w1_slave")
+        # fallback: pinned id, else first probe on the bus
+        pinned = f"/sys/bus/w1/devices/{CELL_DS18B20_ID}/w1_slave"
+        sensors = [pinned] if os.path.exists(pinned) else \
+                  glob.glob("/sys/bus/w1/devices/28-*/w1_slave")
     if not sensors:
         return None
     for attempt in range(retries):
@@ -326,13 +400,19 @@ def _mission_log_row(h_duty=0.0, cell_temp=None):
             return
     with _gps_lock:
         g = dict(_gps_state)
+    alt = float(g.get('alt', 0) or 0)
+    fix = int(g.get('fix', 0) or 0)
+    now = time.time()
+    vspeed = _calc_mission_vspeed(alt, now)
+    with _gps_lock:
+        _gps_state['vspeed'] = round(vspeed, 2)
     with _flight_lock:
         fstate = _flight_state.get('state', 'unknown')
     row = [
         datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-        g.get('lat', ''), g.get('lon', ''), g.get('alt', ''),
-        g.get('speed', ''), g.get('heading', ''), g.get('vspeed', ''),
-        g.get('sats', ''), g.get('hdop', ''), g.get('fix', ''),
+        g.get('lat', ''), g.get('lon', ''), alt,
+        g.get('speed', ''), g.get('heading', ''), round(vspeed, 2),
+        g.get('sats', ''), g.get('hdop', ''), fix,
         '' if cell_temp is None else round(cell_temp, 2),
         round(h_duty, 1),
         fstate,
@@ -342,6 +422,12 @@ def _mission_log_row(h_duty=0.0, cell_temp=None):
             _mission['file'].write(','.join(str(x) for x in row) + '\n')
             _mission['file'].flush()
             _mission['count'] += 1
+    with _lock:
+        recording = state['recording']
+        mode = state['mode']
+    if recording and mode == 'mission':
+        _check_landing_auto_stop(alt, vspeed, fix)
+        _check_checkpoint_photos(alt)
 
 
 def _mission_start(tag='mission'):
@@ -350,6 +436,7 @@ def _mission_start(tag='mission'):
     f = open(p, 'w', buffering=1)
     hdr = 'utc,lat,lon,alt_m,speed_kmh,heading_deg,vspeed_ms,sats,hdop,fix,cell_temp_c,heater_duty_pct,flight_state\n'
     f.write(hdr)
+    _reset_mission_gps_state()
     with _mission_lock:
         _mission.update({'active': True, 'file': f, 'path': p, 'count': 0, 'start_t': time.time()})
 
@@ -360,6 +447,205 @@ def _mission_stop():
         if _mission['file']:
             _mission['file'].close()
             _mission['file'] = None
+
+
+# ── Mission GPS helpers (landing auto-stop + checkpoint stills) ───────────────
+
+_LAND_CONFIRM_SAMPLES = 30   # ~30 mission-log rows at 1 Hz before auto-stop
+_CHECKPOINT_TAIL_BYTES = 512 * 1024
+
+_mission_gps = {
+    'last_alt': None,
+    'last_t':   None,
+    'max_alt':  0.0,
+    'land_samples': 0,
+}
+_land_auto_stop_armed = False
+_checkpoint_tracker = None
+_checkpoint_tracker_lock = threading.Lock()
+
+
+class MilestoneTracker:
+    """Fire once when altitude crosses configured milestones (ascending)."""
+
+    def __init__(self):
+        self._last_alt = None
+
+    def check(self, alt: float, cfg: dict) -> int | None:
+        milestones = sorted(int(m) for m in cfg.get("milestones_m", []))
+        triggered = {int(m) for m in cfg.get("triggered_m", [])}
+        last = self._last_alt
+        self._last_alt = alt
+        if last is None:
+            return None
+        for m in milestones:
+            if m in triggered:
+                continue
+            if last < m <= alt:
+                return m
+        return None
+
+    def reset(self):
+        self._last_alt = None
+
+
+def _reset_mission_gps_state():
+    global _land_auto_stop_armed
+    _mission_gps.update({
+        'last_alt': None,
+        'last_t': None,
+        'max_alt': 0.0,
+        'land_samples': 0,
+    })
+    _land_auto_stop_armed = False
+    with _checkpoint_tracker_lock:
+        global _checkpoint_tracker
+        if _checkpoint_tracker is None:
+            _checkpoint_tracker = MilestoneTracker()
+        else:
+            _checkpoint_tracker.reset()
+
+
+def _calc_mission_vspeed(alt: float, now: float) -> float:
+    g = _mission_gps
+    vs = 0.0
+    if g['last_alt'] is not None and g['last_t'] is not None:
+        dt = now - g['last_t']
+        if dt > 0.05:
+            vs = (alt - g['last_alt']) / dt
+    g['last_alt'] = alt
+    g['last_t'] = now
+    g['max_alt'] = max(g['max_alt'], alt)
+    return vs
+
+
+def _check_landing_auto_stop(alt: float, vspeed: float, fix: int):
+    """After enough low, stable-altitude GPS rows, stop mission recording."""
+    global _land_auto_stop_armed
+    if _land_auto_stop_armed:
+        return
+    with _lock:
+        if not state['recording'] or state['mode'] != 'mission':
+            return
+    if fix < 1:
+        _mission_gps['land_samples'] = 0
+        return
+    with _flight_lock:
+        launch_alt = float(_flight_state.get('launch_alt') or alt)
+    if _mission_gps['max_alt'] <= launch_alt + 150:
+        _mission_gps['land_samples'] = 0
+        return
+    if alt <= launch_alt + _LAND_ALT_M and abs(vspeed) <= _LAND_VS_MAX:
+        _mission_gps['land_samples'] += 1
+    else:
+        _mission_gps['land_samples'] = 0
+    if _mission_gps['land_samples'] < _LAND_CONFIRM_SAMPLES:
+        return
+    _land_auto_stop_armed = True
+    print(f"[landing] Auto-stopping cameras after {_LAND_CONFIRM_SAMPLES} "
+          f"stable low-alt GPS samples (alt={alt:.0f}m, v={vspeed:+.2f}m/s)")
+    threading.Thread(target=stop_recording, daemon=True).start()
+
+
+def _check_checkpoint_photos(alt: float):
+    """Capture stills when synced milestone altitudes are crossed during recording."""
+    with _lock:
+        if not state['recording']:
+            return
+    with _checkpoint_tracker_lock:
+        tracker = _checkpoint_tracker
+        if tracker is None:
+            return
+    cfg = _load_lora_diag()
+    photo_cfg = {
+        "milestones_m": cfg.get("milestones_m", []),
+        "triggered_m": cfg.get("photo_triggered_m", []),
+    }
+    milestone = tracker.check(alt, photo_cfg)
+    if milestone is None:
+        return
+    triggered = sorted({int(m) for m in cfg.get("photo_triggered_m", [])} | {int(milestone)})
+    cfg["photo_triggered_m"] = triggered
+    _save_lora_diag(cfg)
+    threading.Thread(
+        target=_capture_checkpoint_photos,
+        args=(milestone,),
+        daemon=True,
+    ).start()
+
+
+def _ffmpeg_last_frame(src, out, *, fmt=None):
+    """Best-effort last frame from a growing capture file."""
+    p = Path(src)
+    if not p.exists() or p.stat().st_size < 4096:
+        return False
+    tail_path = p.with_name(f".{p.stem}_tail{p.suffix}")
+    try:
+        size = p.stat().st_size
+        with open(p, "rb") as f:
+            f.seek(max(0, size - _CHECKPOINT_TAIL_BYTES))
+            tail_path.write_bytes(f.read())
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+        if fmt:
+            cmd += ["-f", fmt]
+        elif p.suffix == ".h264":
+            cmd += ["-f", "h264"]
+        elif p.suffix == ".mjpeg":
+            cmd += ["-f", "mjpeg"]
+        cmd += ["-i", str(tail_path), "-frames:v", "1", "-q:v", "2", str(out)]
+        r = subprocess.run(cmd, capture_output=True, timeout=30)
+        return (
+            r.returncode == 0
+            and Path(out).exists()
+            and Path(out).stat().st_size > 0
+        )
+    except Exception as e:
+        print(f"[checkpoint] frame grab failed {p.name}: {e}")
+        return False
+    finally:
+        try:
+            tail_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _capture_usb_still(out_jpg, usb_dev):
+    if not usb_dev:
+        return False
+    s = state["settings"]["usb_cam"]
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "v4l2", "-input_format", "mjpeg",
+        "-video_size", f"{s['width']}x{s['height']}",
+        "-i", usb_dev,
+        "-frames:v", "1", "-q:v", "2", str(out_jpg),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=15)
+        return r.returncode == 0 and Path(out_jpg).exists()
+    except Exception:
+        return False
+
+
+def _capture_checkpoint_photos(milestone_m: int):
+    with _lock:
+        prefix = _rec_prefix
+        hq_out = _rec_hq_out
+        usb_out = _rec_usb_out
+        if not state["recording"] or not prefix:
+            return
+    base = f"{prefix}_checkpoint_{int(milestone_m)}m"
+    ok_hq = ok_usb = False
+    if hq_out:
+        ok_hq = _ffmpeg_last_frame(hq_out, CAPTURES_DIR / f"{base}_hq.jpg")
+    usb_jpg = CAPTURES_DIR / f"{base}_usb.jpg"
+    usb_dev = find_usb_cam()
+    if usb_dev:
+        ok_usb = _capture_usb_still(usb_jpg, usb_dev)
+    if not ok_usb and usb_out:
+        ok_usb = _ffmpeg_last_frame(usb_out, usb_jpg)
+    print(f"[checkpoint] {milestone_m}m — HQ={'ok' if ok_hq else 'skip'} "
+          f"USB={'ok' if ok_usb else 'skip'}")
 
 
 # ── Flight state machine ──────────────────────────────────────────────────────
@@ -463,6 +749,7 @@ threading.Thread(target=_flight_monitor, daemon=True).start()
 _HEATER_PIN      = 18    # BCM — GPIO18 pin 12 → 100Ω → IRFZ44N gate
 _HEATER_PWM_FREQ = 100   # Hz  — fine for thermal mass
 _HEATER_MAX_A    = 4.0   # A at 100 % PWM; avg current scales linearly with duty
+_HEATER_MAH_CAP  = 5000.0 # 5 Ah flight budget — heater auto-stops when reached
 
 _heater = {
     'enabled':   False,
@@ -480,6 +767,7 @@ _heater = {
     'last_tune':   None,
     'used_mah':       0.0,   # cumulative charge drawn by the heater (mAh)
     '_last_charge_t': 0.0,   # timestamp of last charge integration step
+    'mah_cap_hit':    False,  # set when used_mah reaches _HEATER_MAH_CAP
 }
 _heater_lock = threading.Lock()
 _heater_pwm  = None
@@ -510,6 +798,27 @@ def _heater_load_settings():
         pass
 
 _heater_load_settings()
+
+
+def _heater_enforce_mah_cap(*, log: bool = False) -> bool:
+    """Disable heater when the 5 Ah budget is exhausted. Returns True if capped."""
+    with _heater_lock:
+        if _heater['used_mah'] < _HEATER_MAH_CAP:
+            return False
+        newly = not _heater.get('mah_cap_hit', False)
+        _heater['mah_cap_hit'] = True
+        _heater['enabled'] = False
+        _heater['autotuning'] = False
+        _heater['_tuner'] = None
+        _heater['duty'] = 0.0
+        _heater['_integral'] = 0.0
+        used = _heater['used_mah']
+    if log and newly:
+        print(f"[heater] 5 Ah budget exhausted ({used:.0f} mAh) — heater disabled")
+    return True
+
+
+_heater_enforce_mah_cap()
 
 
 class _RelayAutoTuner:
@@ -603,9 +912,20 @@ def _heater_loop():
             temp = hist[-1]['c'] if hist else None
 
             tune_done = False
+            cap_logged = False
             with _heater_lock:
                 _heater['temp'] = temp
-                if not _heater['enabled'] or temp is None:
+                if _heater.get('mah_cap_hit') or _heater['used_mah'] >= _HEATER_MAH_CAP:
+                    duty = 0.0
+                    if _heater['used_mah'] >= _HEATER_MAH_CAP:
+                        newly = not _heater.get('mah_cap_hit', False)
+                        _heater['mah_cap_hit'] = True
+                        _heater['enabled'] = False
+                        _heater['autotuning'] = False
+                        _heater['_tuner'] = None
+                        _heater['_integral'] = 0.0
+                        cap_logged = newly
+                elif not _heater['enabled'] or temp is None:
                     duty = 0.0
                 elif _heater['autotuning']:
                     if _heater['_tuner'] is None:
@@ -643,9 +963,24 @@ def _heater_loop():
                     _heater['used_mah'] += i_ma * (dt_c / 3600.0)
                 _heater['_last_charge_t'] = t_now
 
+                if _heater['used_mah'] >= _HEATER_MAH_CAP:
+                    newly = not _heater.get('mah_cap_hit', False)
+                    _heater['mah_cap_hit'] = True
+                    _heater['enabled'] = False
+                    _heater['autotuning'] = False
+                    _heater['_tuner'] = None
+                    _heater['duty'] = 0.0
+                    _heater['_integral'] = 0.0
+                    duty = 0.0
+                    cap_logged = cap_logged or newly
+
+            if cap_logged:
+                with _heater_lock:
+                    used = _heater['used_mah']
+                print(f"[heater] 5 Ah budget exhausted ({used:.0f} mAh) — heater disabled")
             if _heater_pwm is not None:
                 _heater_pwm.ChangeDutyCycle(duty)
-            if tune_done:
+            if tune_done or cap_logged:
                 _heater_save_settings()
             # persist the running mAh total every ~30 s so a restart doesn't lose it
             if int(t_now) % 30 == 0:
@@ -659,23 +994,45 @@ def _heater_loop():
 threading.Thread(target=_heater_loop, daemon=True).start()
 
 
+def _is_usb_capture(dev):
+    """True only for a genuine USB/UVC *video-capture* node — never the Pi's
+    CSI (unicam), codec, ISP or mem2mem nodes."""
+    try:
+        r = subprocess.run(["v4l2-ctl", "--device", dev, "--info"],
+                            capture_output=True, text=True, timeout=2)
+        info = (r.stdout + r.stderr).lower()
+    except Exception:
+        return False
+    # Must be on the USB bus / UVC driver and NOT an internal platform device.
+    if not ("usb" in info or "uvc" in info):
+        return False
+    if any(x in info for x in ("unicam", "codec", "isp", "pisp", "platform:")):
+        return False
+    # Must actually expose a video-capture format (the 2nd UVC node is metadata).
+    try:
+        r2 = subprocess.run(["v4l2-ctl", "--device", dev, "--list-formats"],
+                            capture_output=True, text=True, timeout=2)
+        fmts = (r2.stdout + r2.stderr).lower()
+        return "video capture" in fmts or "mjpg" in fmts or "yuyv" in fmts
+    except Exception:
+        return False
+
+
 def find_usb_cam():
-    """Return first USB UVC video device. Skips /dev/video2 (libcamera ISP node)."""
+    """Return the first genuine USB (UVC) capture device, or None.
+
+    On this Pi /dev/video0..23 are the internal CSI/codec/ISP nodes, so we never
+    fall back to those. A real USB webcam shows up under /dev/v4l/by-path/*usb*
+    (and as a higher /dev/videoN); we verify it's a USB capture node before use.
+    """
+    # Preferred: the by-path symlink whose name contains 'usb'.
+    for p in sorted(glob.glob("/dev/v4l/by-path/*usb*")):
+        dev = os.path.realpath(p)
+        if _is_usb_capture(dev):
+            return dev
+    # Fallback: probe every video node, accept only verified USB capture devices.
     for dev in sorted(glob.glob("/dev/video*")):
-        if dev == "/dev/video2":
-            continue  # libcamera internal ISP / V4L2 mem2mem device — not a real camera
-        try:
-            r = subprocess.run(
-                ["v4l2-ctl", "--device", dev, "--info"],
-                capture_output=True, text=True, timeout=2,
-            )
-            info = (r.stdout + r.stderr).lower()
-            if "usb" in info or "uvc" in info:
-                return dev
-        except Exception:
-            pass
-    for dev in ("/dev/video0", "/dev/video1"):
-        if os.path.exists(dev):
+        if _is_usb_capture(dev):
             return dev
     return None
 
@@ -697,10 +1054,10 @@ def hq_cam_available():
     return False
 
 
-def start_recording(mode):
+def start_recording(mode, *, skip_mission_start: bool = False):
     global hq_process, usb_process, _last_stop_time
     global _rec_hq_cmd, _rec_usb_cmd, _rec_hq_out, _rec_usb_out
-    global _rec_log_dir, _rec_prefix, _rec_restart
+    global _rec_log_dir, _rec_prefix, _rec_restart, _rec_hq_files, _rec_hq_fps
 
     # Kill any stale rpicam-vid (e.g. crashed live-stream session) and let the
     # camera hardware reset — without this the V4L2 ISP node stays busy and the
@@ -741,6 +1098,8 @@ def start_recording(mode):
 
     usb_dev = find_usb_cam()
     usb_cmd = None
+    if not usb_dev:
+        print("[USB cam] No USB webcam detected — recording HQ camera only.")
     if usb_dev:
         dfr_val = "0" if usb.get("prioritize_fps", True) else "1"
         subprocess.run(
@@ -764,8 +1123,10 @@ def start_recording(mode):
     hq_log = open(log_dir / f"{prefix}_hq.log", "w")
     usb_log = open(log_dir / f"{prefix}_usb.log", "w")
 
-    if mode == 'mission':
-        _mission_start('mission')
+    if mode == "mission" and not skip_mission_start:
+        _mission_start("mission")
+    elif mode == "mission":
+        _reset_mission_gps_state()
 
     with _lock:
         # Try to start HQ cam; retry once on immediate crash (V4L2 timeout)
@@ -809,13 +1170,15 @@ def start_recording(mode):
         _rec_log_dir = log_dir
         _rec_prefix  = prefix
         _rec_restart = {'hq': 0, 'usb': 0}
+        _rec_hq_files = [hq_out]          # remuxed to .mp4 on stop
+        _rec_hq_fps   = hq["fps"]
 
         state["recording"] = True
         state["mode"] = mode
         state["start_time"] = time.time()
 
 
-def stop_recording():
+def stop_recording(*, preserve_mission: bool = False):
     global hq_process, usb_process, _last_stop_time
     global _rec_hq_cmd, _rec_usb_cmd
 
@@ -841,8 +1204,13 @@ def stop_recording():
         usb_process = None
         state["mode"] = None
         state["start_time"] = None
-    _mission_stop()
+        hq_files = list(_rec_hq_files)
+        hq_fps   = _rec_hq_fps
+    if not preserve_mission:
+        _mission_stop()
     _last_stop_time = time.time()
+    # Wrap the raw HQ stream(s) into playable .mp4 (USB is already .mp4 via ffmpeg).
+    _remux_hq_outputs(hq_files, hq_fps)
 
 
 def _recording_watchdog():
@@ -885,6 +1253,7 @@ def _recording_watchdog():
                         np = subprocess.Popen(newcmd, stdout=logf, stderr=logf)
                         if key == "hq":
                             hq_process = np
+                            _rec_hq_files.append(newcmd[oi])   # remux this segment too
                         else:
                             usb_process = np
                         print(f"[watchdog] {key.upper()} cam died (rc), respawned segment {seg}: "
@@ -896,6 +1265,8 @@ def _recording_watchdog():
 
 
 threading.Thread(target=_recording_watchdog, daemon=True).start()
+# Recover raw camera files left by a crashed / power-lost session into playable .mp4.
+threading.Thread(target=_remux_orphans, daemon=True).start()
 
 
 def get_files():
@@ -925,33 +1296,107 @@ def api_status():
     duration = None
     if state["start_time"]:
         duration = int(time.time() - state["start_time"])
+    with _settings_restart_lock:
+        restarting = _settings_restart_busy
     return jsonify({
         "recording": state["recording"],
         "streaming": state["streaming"],
         "mode": state["mode"],
         "duration": duration,
+        "restarting_recording": restarting,
         "hq_cam_available": hq_avail,
         "usb_cam_device": usb_dev,
+        "usb_cam_available": usb_dev is not None,
         "settings": state["settings"],
     })
 
 
+_settings_restart_busy = False
+_settings_restart_lock = threading.Lock()
+
+
+def _patch_camera_settings(data: dict) -> bool:
+    """Apply settings patch; return True if any value changed."""
+    changed = False
+    with _lock:
+        if "hq_cam" in data:
+            patch = {
+                k: v for k, v in data["hq_cam"].items()
+                if k in ("width", "height", "fps")
+            }
+            for key, val in patch.items():
+                if state["settings"]["hq_cam"].get(key) != val:
+                    changed = True
+            state["settings"]["hq_cam"].update(patch)
+        if "usb_cam" in data:
+            patch = {
+                k: v for k, v in data["usb_cam"].items()
+                if k in ("width", "height", "fps", "prioritize_fps")
+            }
+            for key, val in patch.items():
+                if state["settings"]["usb_cam"].get(key) != val:
+                    changed = True
+            state["settings"]["usb_cam"].update(patch)
+    return changed
+
+
+def _restart_recording_for_settings(mode: str, orig_start: float | None) -> None:
+    """Stop capture (remux/save), then start a new segment at the new resolution."""
+    global _settings_restart_busy
+    try:
+        print(f"[settings] Restarting {mode} capture with new camera settings…")
+        stop_recording(preserve_mission=True)
+        start_recording(mode, skip_mission_start=True)
+        if orig_start is not None:
+            with _lock:
+                state["start_time"] = orig_start
+        print("[settings] Capture restarted.")
+    except Exception as e:
+        print(f"[settings] Restart failed: {e}")
+    finally:
+        with _settings_restart_lock:
+            _settings_restart_busy = False
+
+
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
-    if state["recording"]:
-        return jsonify({"error": "Cannot change settings while recording"}), 400
+    global _settings_restart_busy
+    if state["streaming"]:
+        return jsonify({"error": "Stop live view before changing camera settings"}), 400
+    with _settings_restart_lock:
+        if _settings_restart_busy:
+            return jsonify({"error": "Camera restart already in progress"}), 409
+
     data = request.json or {}
-    if "hq_cam" in data:
-        state["settings"]["hq_cam"].update({
-            k: v for k, v in data["hq_cam"].items()
-            if k in ("width", "height", "fps")
+    with _lock:
+        was_recording = state["recording"]
+        mode = state["mode"]
+        orig_start = state["start_time"]
+
+    changed = _patch_camera_settings(data)
+    if not changed:
+        return jsonify({
+            "ok": True,
+            "settings": state["settings"],
+            "restarted_recording": False,
         })
-    if "usb_cam" in data:
-        state["settings"]["usb_cam"].update({
-            k: v for k, v in data["usb_cam"].items()
-            if k in ("width", "height", "fps", "prioritize_fps")
+
+    if was_recording and mode:
+        with _settings_restart_lock:
+            _settings_restart_busy = True
+        threading.Thread(
+            target=_restart_recording_for_settings,
+            args=(mode, orig_start),
+            daemon=True,
+        ).start()
+        return jsonify({
+            "ok": True,
+            "settings": state["settings"],
+            "restarting_recording": True,
+            "mode": mode,
         })
-    return jsonify({"ok": True, "settings": state["settings"]})
+
+    return jsonify({"ok": True, "settings": state["settings"], "restarted_recording": False})
 
 
 @app.route("/api/start", methods=["POST"])
@@ -1195,6 +1640,8 @@ def api_heater_get():
     with _heater_lock:
         h = dict(_heater)
     tuner = h.get('_tuner')
+    used = float(h.get('used_mah', 0.0) or 0.0)
+    cap_hit = bool(h.get('mah_cap_hit')) or used >= _HEATER_MAH_CAP
     return jsonify({
         'enabled':           h['enabled'],
         'duty':              round(h['duty'], 1),
@@ -1206,7 +1653,11 @@ def api_heater_get():
         'autotuning':        h['autotuning'],
         'autotune_crosses':  tuner.crosses if tuner else 0,
         'last_tune':         h['last_tune'],
-        'used_mah':          round(h.get('used_mah', 0.0), 1),
+        'used_mah':          round(used, 1),
+        'mah_cap_mah':       _HEATER_MAH_CAP,
+        'mah_cap_hit':       cap_hit,
+        'mah_remaining_mah': round(max(0.0, _HEATER_MAH_CAP - used), 1),
+        'mah_cap_pct':       round(min(100.0, 100.0 * used / _HEATER_MAH_CAP), 1),
         'current_a':         round((h['duty'] / 100.0) * _HEATER_MAX_A, 2),
         'max_a':             _HEATER_MAX_A,
     })
@@ -1217,7 +1668,22 @@ def api_heater_post():
     data = request.json or {}
     with _heater_lock:
         if 'enabled' in data:
-            _heater['enabled'] = bool(data['enabled'])
+            want_on = bool(data['enabled'])
+            if want_on and (
+                _heater.get('mah_cap_hit')
+                or _heater['used_mah'] >= _HEATER_MAH_CAP
+            ):
+                return jsonify({
+                    'ok': False,
+                    'error': 'mah_cap_exhausted',
+                    'message': (
+                        f"Heater budget exhausted ({_heater['used_mah']:.0f} / "
+                        f"{_HEATER_MAH_CAP:.0f} mAh). Reset mAh before re-enabling."
+                    ),
+                    'used_mah': round(_heater['used_mah'], 1),
+                    'mah_cap_mah': _HEATER_MAH_CAP,
+                }), 409
+            _heater['enabled'] = want_on
             if not _heater['enabled']:
                 _heater['_integral'] = 0.0
         if 'setpoint' in data:
@@ -1226,6 +1692,12 @@ def api_heater_post():
             if k in data:
                 _heater[k] = max(0.0, float(data[k]))
         if data.get('autotune_start'):
+            if _heater.get('mah_cap_hit') or _heater['used_mah'] >= _HEATER_MAH_CAP:
+                return jsonify({
+                    'ok': False,
+                    'error': 'mah_cap_exhausted',
+                    'message': 'Heater budget exhausted — reset mAh before auto-tune.',
+                }), 409
             _heater['autotuning'] = True
             _heater['_tuner']     = None
             _heater['enabled']    = True
@@ -1234,6 +1706,7 @@ def api_heater_post():
             _heater['_tuner']     = None
         if data.get('reset_mah'):
             _heater['used_mah'] = 0.0          # zero the charge counter (pre-flight)
+            _heater['mah_cap_hit'] = False
     _heater_save_settings()
     return jsonify({'ok': True})
 
@@ -1278,18 +1751,18 @@ _sensors.start()
 def api_sensors():
     latest, hist = _sensors.snapshot()
     return jsonify({"latest": latest, "history": hist,
-                    "intervals": _sensors.get_intervals()})
+                    "rates_hz": _sensors.get_rates_hz()})
 
 
 @app.route("/api/sensors/config", methods=["GET", "POST"])
 def api_sensors_config():
-    """GET current per-sensor poll/log intervals; POST {sensor: seconds, ...}."""
+    """GET / POST per-sensor poll/log rates IN HERTZ ({sensor: hz, ...})."""
     if request.method == "POST":
         updates = request.json or {}
-        return jsonify({"ok": True, "intervals": _sensors.set_intervals(updates)})
-    return jsonify({"intervals": _sensors.get_intervals(),
-                    "defaults": _sensors.DEFAULT_INTERVALS,
-                    "min_s": _sensors._MIN_INTERVAL})
+        return jsonify({"ok": True, "rates_hz": _sensors.set_rates_hz(updates)})
+    lo, hi = _sensors.rate_bounds_hz()
+    return jsonify({"rates_hz": _sensors.get_rates_hz(),
+                    "min_hz": lo, "max_hz": hi})
 
 
 @app.route("/download/sensors.csv")
@@ -1315,6 +1788,7 @@ _LORA_DIAG_DEFAULT = {
     "tx_interval_normal": 35,
     "milestones_m": [1000, 5000, 10000, 20000, 30000],
     "triggered_m": [],
+    "photo_triggered_m": [],
     "lean_packets": True,
 }
 
@@ -1343,9 +1817,12 @@ def api_lora_diag_post():
     patch = request.get_json(force=True, silent=True) or {}
     cfg = _load_lora_diag()
     preserve = cfg.get("triggered_m", [])
+    preserve_photos = cfg.get("photo_triggered_m", [])
     cfg.update(patch)
     if "triggered_m" not in patch:
         cfg["triggered_m"] = preserve
+    if "photo_triggered_m" not in patch:
+        cfg["photo_triggered_m"] = preserve_photos
     if "milestones_m" in patch:
         cfg["milestones_m"] = sorted({int(m) for m in cfg["milestones_m"]})
     _save_lora_diag(cfg)
@@ -1356,7 +1833,11 @@ def api_lora_diag_post():
 def api_lora_diag_reset():
     cfg = _load_lora_diag()
     cfg["triggered_m"] = []
+    cfg["photo_triggered_m"] = []
     _save_lora_diag(cfg)
+    with _checkpoint_tracker_lock:
+        if _checkpoint_tracker is not None:
+            _checkpoint_tracker.reset()
     return jsonify(cfg)
 
 

@@ -37,7 +37,15 @@ HISTORY_MAX     = 1440               # in-memory rows kept for the dashboard
 CSV_PATH        = Path("/home/louis/stratopi/logs/sensors.csv")
 CONFIG_PATH     = Path("/home/louis/stratopi/sensor_config.json")
 
-# The first DS18B20 (cell) is pinned by ROM id; the other probes are env temps.
+# Two SEPARATE 1-Wire buses (different GPIOs) so the cell probe and the env
+# probes can't conflict on one bus:
+#   GPIO4  (pin 7)  -> bus 1 : CELL probe (heater PID input)
+#   GPIO17 (pin 11) -> bus 2 : the two ENV probes
+# Both need a 4.7 kΩ pull-up to 3V3 on their own data line. Enabled via two
+# w1-gpio overlays in /boot/firmware/config.txt (see HARDWARE_MAP.md).
+W1_CELL_GPIO = 4
+W1_ENV_GPIO  = 17
+# The cell probe is pinned by ROM id; the env probes are read off the env bus.
 CELL_DS18B20_ID = "28-000000bf78cc"
 
 # Individual poll/log frequencies (seconds) — each sensor sampled at its own rate.
@@ -49,7 +57,8 @@ DEFAULT_INTERVALS = {
     "ds18b20":    5.0,   # all DS18B20 probes
     "csv":       10.0,   # unified CSV row cadence
 }
-_MIN_INTERVAL = 1.0      # floor to protect the sensors / bus
+_MIN_INTERVAL = 0.5      # period floor (=> max 2 Hz; DS18B20 can't go faster anyway)
+_MAX_INTERVAL = 3600.0   # period ceiling (=> min ~0.0003 Hz)
 INTERVAL_S    = DEFAULT_INTERVALS["csv"]   # back-compat alias used by the API
 
 # Sentinels (kept identical to the Arduino logger so old/new CSVs line up)
@@ -225,17 +234,61 @@ def _read_one_ds(path):
         return ERR_DS
 
 
-def read_ds18b20_all():
-    """Return (cell, env1, env2). The cell probe is pinned by ROM id; the other
-    probes (sorted by id) are env temps. Missing probes -> ERR_DS."""
-    all_ids = sorted(p.split("/")[-2] for p in glob.glob("/sys/bus/w1/devices/28-*/w1_slave"))
-    cell = ERR_DS
+def _w1_buses():
+    """Map each 1-Wire bus master -> sorted list of its 28-* slave ROM ids."""
+    buses = {}
+    for m in sorted(glob.glob("/sys/bus/w1/devices/w1_bus_master*")):
+        try:
+            ids = sorted(s for s in open(m + "/w1_master_slaves").read().split()
+                         if s.startswith("28-"))
+        except Exception:
+            ids = []
+        buses[m] = ids
+    return buses
+
+
+def classify_ds18b20():
+    """Decide which probe is the CELL and which are ENV, BY PORT (bus).
+
+    The kernel doesn't expose which w1 bus-master maps to which GPIO, but the
+    wiring is unambiguous by topology: the CELL probe sits ALONE on its own bus
+    (GPIO4), and the two ENV probes share the OTHER bus (GPIO17). So:
+        cell bus = the non-empty bus with the FEWEST probes (the lone cell)
+        env bus  = the other bus(es)
+    Returns (cell_id_or_None, [env_ids]).
+
+    Fallbacks: a single populated bus (before the env probes are wired) uses the
+    pinned CELL id if present, else treats the first probe as the cell."""
+    buses = _w1_buses()
+    nonempty = {m: ids for m, ids in buses.items() if ids}
+
+    if len(nonempty) >= 2:
+        # cell = lone probe on its own bus; tie-break on master path for stability
+        ordered = sorted(nonempty.items(), key=lambda kv: (len(kv[1]), kv[0]))
+        cell_master = ordered[0][0]
+        cell_id = nonempty[cell_master][0]
+        env_ids = [i for m, ids in nonempty.items() if m != cell_master for i in ids]
+        return cell_id, sorted(env_ids)
+
+    # single-bus fallback (env bus not wired yet)
+    all_ids = sorted(i for ids in buses.values() for i in ids)
+    if not all_ids:
+        return None, []
     if CELL_DS18B20_ID in all_ids:
-        cell = _read_one_ds(f"/sys/bus/w1/devices/{CELL_DS18B20_ID}/w1_slave")
-    env_ids = [i for i in all_ids if i != CELL_DS18B20_ID]
-    # if the pinned cell id isn't present, treat the first found as cell
-    if cell == ERR_DS and CELL_DS18B20_ID not in all_ids and env_ids:
-        cell = _read_one_ds(f"/sys/bus/w1/devices/{env_ids.pop(0)}/w1_slave")
+        return CELL_DS18B20_ID, [i for i in all_ids if i != CELL_DS18B20_ID]
+    return all_ids[0], all_ids[1:]
+
+
+def cell_sensor_path():
+    """Filesystem path of the CELL probe's w1_slave, or None (used by the heater)."""
+    cell_id, _ = classify_ds18b20()
+    return f"/sys/bus/w1/devices/{cell_id}/w1_slave" if cell_id else None
+
+
+def read_ds18b20_all():
+    """Return (cell, env1, env2) — cell read off its own bus, env off the other."""
+    cell_id, env_ids = classify_ds18b20()
+    cell = _read_one_ds(f"/sys/bus/w1/devices/{cell_id}/w1_slave") if cell_id else ERR_DS
     env = [_read_one_ds(f"/sys/bus/w1/devices/{i}/w1_slave") for i in env_ids[:2]]
     while len(env) < 2:
         env.append(ERR_DS)
@@ -294,11 +347,37 @@ def set_intervals(updates):
         for k, v in (updates or {}).items():
             if k in DEFAULT_INTERVALS:
                 try:
-                    _intervals[k] = max(_MIN_INTERVAL, float(v))
+                    _intervals[k] = min(_MAX_INTERVAL, max(_MIN_INTERVAL, float(v)))
                 except (TypeError, ValueError):
                     pass
     save_config()
     return get_intervals()
+
+
+# ── Hz-facing API (the UI works in Hz; we store the period in seconds) ─────────
+def get_rates_hz():
+    """Current sample/log rates in Hz (= 1 / period)."""
+    return {k: round(1.0 / v, 3) if v else 0.0 for k, v in get_intervals().items()}
+
+
+def set_rates_hz(updates):
+    """Set one or more rates in Hz; converts to a period and clamps. Returns Hz."""
+    secs = {}
+    for k, hz in (updates or {}).items():
+        if k in DEFAULT_INTERVALS:
+            try:
+                hz = float(hz)
+                if hz > 0:
+                    secs[k] = 1.0 / hz
+            except (TypeError, ValueError):
+                pass
+    set_intervals(secs)
+    return get_rates_hz()
+
+
+def rate_bounds_hz():
+    """(min_hz, max_hz) allowed for the UI."""
+    return round(1.0 / _MAX_INTERVAL, 4), round(1.0 / _MIN_INTERVAL, 3)
 
 
 def set_extra_provider(fn):
@@ -308,15 +387,23 @@ def set_extra_provider(fn):
     _extra_provider = fn
 
 
-def _open_hardware():
-    bus = aht = ens = pm_ser = None
+def _hw_ok(dev):
+    """A device is 'up' only if it exists AND initialised (i2c sensors set .ok)."""
+    return dev is not None and getattr(dev, "ok", True)
+
+
+def _open_hardware(bus=None):
+    """(Re)initialise sensors. Reuses an already-open I2C bus if given, so a retry
+    after the wiring is fixed re-inits AHT21/ENS160 without leaking bus handles."""
+    aht = ens = pm_ser = None
     if smbus2 is not None:
         try:
-            bus = smbus2.SMBus(I2C_BUS)
+            if bus is None:
+                bus = smbus2.SMBus(I2C_BUS)
             aht = AHT21(bus)
             ens = ENS160(bus)
         except Exception:
-            bus = aht = ens = None
+            aht = ens = None
     if serial is not None:
         try:
             pm_ser = serial.Serial(PLANTOWER_PORT, PLANTOWER_BAUD, timeout=1)
@@ -344,11 +431,13 @@ def _poller():
         now = time.time()
         iv = get_intervals()
 
-        # retry hardware that failed to open (e.g. before reboot / wiring)
-        if (aht is None or ens is None or pm_ser is None) and now - last["hw_retry"] > 30:
-            b2, a2, e2, p2 = _open_hardware()
-            if aht is None: bus, aht = b2, a2
-            if ens is None: ens = e2
+        # Re-init any sensor that isn't up yet — covers both "not opened" AND
+        # "opened but failed to init" (e.g. I2C bus empty at boot, sensor wired
+        # or its cabling fixed later). Reuses the open bus so we don't leak.
+        if (not _hw_ok(aht) or not _hw_ok(ens) or pm_ser is None) and now - last["hw_retry"] > 30:
+            bus, a2, e2, p2 = _open_hardware(bus)
+            if not _hw_ok(aht): aht = a2
+            if not _hw_ok(ens): ens = e2
             if pm_ser is None: pm_ser = p2
             last["hw_retry"] = now
 
@@ -395,7 +484,7 @@ def _poller():
             _write_csv(row)
             last["csv"] = now
 
-        time.sleep(0.5)   # base tick
+        time.sleep(0.2)   # base tick (fine enough for the 2 Hz max rate)
 
 
 def _append(row):

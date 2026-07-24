@@ -135,6 +135,7 @@
     <input type="number" id="hq-fps" value="30" min="1" max="120" step="1" oninput="updateStorageEstimate()">
     <input type="hidden" id="hq-width" value="1920">
     <input type="hidden" id="hq-height" value="1080">
+    <p style="color:#8b949e;font-size:.75rem;margin:8px 0">While recording: saving stops capture, remuxes the current video, and starts a new file at the new settings.</p>
     <button class="btn-save" onclick="saveSettings()">Save Settings</button>
   </div>
 
@@ -204,10 +205,13 @@
         <div style="font-size:.73rem;color:#484f58;margin-bottom:4px">STATUS</div>
         <div id="ht-status" style="font-size:.88rem;font-weight:600;color:#484f58">Disabled</div>
       </div>
-      <div style="min-width:130px">
+      <div style="min-width:150px">
         <div style="font-size:.73rem;color:#484f58;margin-bottom:4px">CURRENT / CHARGE</div>
         <div id="ht-current" style="font-size:.88rem;color:#8b949e">0.00 A</div>
-        <div id="ht-mah" style="font-size:.95rem;font-weight:600;color:#f0883e">0.0 mAh</div>
+        <div id="ht-mah" style="font-size:.95rem;font-weight:600;color:#f0883e">0.0 / 5000 mAh</div>
+        <div style="background:#21262d;border-radius:4px;height:6px;overflow:hidden;margin-top:5px">
+          <div id="ht-mah-bar" style="background:#f0883e;height:100%;width:0%;transition:width .6s"></div>
+        </div>
       </div>
     </div>
     <div style="display:flex;gap:10px;margin-top:14px;align-items:flex-end;flex-wrap:wrap">
@@ -233,6 +237,9 @@
       <button class="btn-save" onclick="heaterApply()" style="margin-top:0;width:auto">Apply</button>
       <button id="ht-autotune-btn" class="btn-stream" onclick="heaterAutoTune()" style="margin-top:0">Auto-Tune PID</button>
       <button class="btn-stream" onclick="heaterResetMah()" style="margin-top:0">Reset mAh</button>
+    </div>
+    <div id="ht-cap-bar" style="display:none;margin-top:8px;padding:7px 10px;background:#3a1a1a;border:1px solid #da3633;border-radius:6px;font-size:.78rem;color:#f85149">
+      <b>5 Ah budget exhausted</b> — heater disabled. Use <b>Reset mAh</b> before the next flight.
     </div>
     <div id="ht-autotune-bar" style="display:none;margin-top:8px;padding:7px 10px;background:#1a2000;border:1px solid #4a6a00;border-radius:6px;font-size:.78rem;color:#c8e44a">
       Relay auto-tuning… <span id="ht-at-crosses">0</span>/4 crossings &nbsp;·&nbsp; keep ambient near setpoint &nbsp;·&nbsp; may take 10–30 min
@@ -335,13 +342,13 @@
 
     <!-- per-sensor polling frequencies -->
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid #21262d">
-      <div style="font-size:.73rem;color:#484f58;margin-bottom:6px">POLL / LOG FREQUENCY (seconds)</div>
+      <div style="font-size:.73rem;color:#484f58;margin-bottom:6px">POLL / LOG RATE (Hz) — max 2 Hz</div>
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
-        <label style="font-size:.78rem;color:#8b949e">AHT21<br><input type="number" id="iv-aht21" min="1" step="1" style="width:62px"></label>
-        <label style="font-size:.78rem;color:#8b949e">ENS160<br><input type="number" id="iv-ens160" min="1" step="1" style="width:62px"></label>
-        <label style="font-size:.78rem;color:#8b949e">Plantower<br><input type="number" id="iv-plantower" min="1" step="1" style="width:62px"></label>
-        <label style="font-size:.78rem;color:#8b949e">DS18B20<br><input type="number" id="iv-ds18b20" min="1" step="1" style="width:62px"></label>
-        <label style="font-size:.78rem;color:#8b949e">CSV log<br><input type="number" id="iv-csv" min="1" step="1" style="width:62px"></label>
+        <label style="font-size:.78rem;color:#8b949e">AHT21<br><input type="number" id="iv-aht21" min="0.01" max="2" step="any" style="width:62px"> Hz</label>
+        <label style="font-size:.78rem;color:#8b949e">ENS160<br><input type="number" id="iv-ens160" min="0.01" max="2" step="any" style="width:62px"> Hz</label>
+        <label style="font-size:.78rem;color:#8b949e">Plantower<br><input type="number" id="iv-plantower" min="0.01" max="2" step="any" style="width:62px"> Hz</label>
+        <label style="font-size:.78rem;color:#8b949e">DS18B20<br><input type="number" id="iv-ds18b20" min="0.01" max="2" step="any" style="width:62px"> Hz</label>
+        <label style="font-size:.78rem;color:#8b949e">CSV log<br><input type="number" id="iv-csv" min="0.01" max="2" step="any" style="width:62px"> Hz</label>
         <button class="btn-save" onclick="applySensorIntervals()" style="width:auto;margin-top:0">Apply</button>
         <span id="iv-status" style="font-size:.75rem;color:#56d364"></span>
       </div>
@@ -373,6 +380,7 @@
       Use to check focus before launch. HQ cam: set focus ring to ∞ and confirm horizon sharpness.<br>
       Live view and recording are mutually exclusive.
     </p>
+    <div id="stream-err" style="display:none;margin-top:10px;padding:8px 12px;background:#2d1416;border:1px solid #6a2a2a;border-radius:6px;color:#f0a0a0;font-size:.8rem"></div>
     <div id="stream-container" style="display:none;margin-top:14px">
       <img id="stream-img" alt="Live view" src="">
     </div>
@@ -564,13 +572,28 @@
         prioritize_fps: document.getElementById('usb-prioritize-fps').checked,
       }
     };
+    const btns = document.querySelectorAll('.btn-save');
+    btns.forEach(b => { b.disabled = true; b.textContent = 'Saving…'; });
     const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const d = await r.json();
     if(d.ok){
-      const btn = document.querySelector('.btn-save');
-      btn.textContent='✓ Saved!';
-      setTimeout(()=>btn.textContent='Save Settings', 1500);
+      if(d.restarting_recording){
+        btns.forEach(b => b.textContent = 'Restarting capture…');
+        const poll = setInterval(async () => {
+          const st = await fetch('/api/status').then(x => x.json());
+          if(!st.restarting_recording && st.recording){
+            clearInterval(poll);
+            btns.forEach(b => { b.disabled = false; b.textContent = '✓ New capture started'; });
+            setTimeout(() => btns.forEach(b => b.textContent = 'Save Settings'), 2000);
+            updateStatus();
+          }
+        }, 2000);
+      } else {
+        btns.forEach(b => { b.disabled = false; b.textContent = '✓ Saved!'; });
+        setTimeout(() => btns.forEach(b => b.textContent = 'Save Settings'), 1500);
+      }
     } else {
+      btns.forEach(b => { b.disabled = false; b.textContent = 'Save Settings'; });
       alert('Error: '+d.error);
     }
   }
@@ -596,15 +619,33 @@
 
   // ── Live view ─────────────────────────────────────────────────────────────
 
-  function startStream(){
+  async function startStream(){
+    const cam = document.getElementById('stream-cam').value;
+    const errEl = document.getElementById('stream-err');
+    errEl.style.display='none';
+    // For USB, check the camera is actually present first (clear message vs broken image)
+    if (cam === 'usb') {
+      try {
+        const st = await fetch('/api/status').then(r=>r.json());
+        if (!st.usb_cam_available) {
+          errEl.textContent = '⚠ No USB webcam detected. Check that it is plugged in and enumerated (lsusb). The Pi HQ camera works regardless.';
+          errEl.style.display='';
+          return;
+        }
+      } catch(e) {}
+    }
     document.getElementById('btn-stream-start').disabled=true;
     document.getElementById('btn-stream-stop').disabled=false;
     document.getElementById('btn-start-test').disabled=true;
     document.getElementById('btn-mission').disabled=true;
     document.getElementById('stream-container').style.display='';
-    const cam = document.getElementById('stream-cam').value;
+    const img = document.getElementById('stream-img');
+    img.onerror = () => {
+      errEl.textContent = '⚠ Live view failed to start for the ' + (cam==='usb'?'USB webcam':'HQ camera') + '. It may be busy or disconnected.';
+      errEl.style.display='';
+    };
     // Setting the src opens the streaming connection to the server
-    document.getElementById('stream-img').src = '/stream?cam=' + cam + '&t=' + Date.now();
+    img.src = '/stream?cam=' + cam + '&t=' + Date.now();
   }
 
   function stopStream(){
@@ -756,12 +797,25 @@
       // current draw + cumulative charge (mAh)
       if (h.current_a != null) document.getElementById('ht-current').textContent =
         h.current_a.toFixed(2) + ' A' + (h.max_a ? ' / ' + h.max_a + ' A max' : '');
-      if (h.used_mah != null) document.getElementById('ht-mah').textContent =
-        h.used_mah.toFixed(1) + ' mAh';
+      const capMah = h.mah_cap_mah != null ? h.mah_cap_mah : 5000;
+      const capPct = h.mah_cap_pct != null ? h.mah_cap_pct : 0;
+      if (h.used_mah != null) {
+        document.getElementById('ht-mah').textContent =
+          h.used_mah.toFixed(1) + ' / ' + capMah.toFixed(0) + ' mAh';
+        const mahBar = document.getElementById('ht-mah-bar');
+        mahBar.style.width = Math.min(100, capPct) + '%';
+        mahBar.style.background = h.mah_cap_hit ? '#f85149' : (capPct > 85 ? '#da3633' : '#f0883e');
+      }
+      const capBar = document.getElementById('ht-cap-bar');
+      capBar.style.display = h.mah_cap_hit ? '' : 'none';
 
       // status text
       const stEl = document.getElementById('ht-status');
-      if (h.autotuning) {
+      if (h.mah_cap_hit) {
+        stEl.textContent = 'Budget exhausted (5 Ah)';
+        stEl.style.color = '#f85149';
+        stEl.className = '';
+      } else if (h.autotuning) {
         stEl.textContent = 'Auto-tuning…'; stEl.className = 'ht-tuning';
       } else if (h.enabled) {
         const sp = h.setpoint, t = h.temp;
@@ -774,11 +828,17 @@
 
       // toggle button
       const tog = document.getElementById('ht-toggle');
-      if (h.enabled) {
+      if (h.mah_cap_hit) {
+        tog.textContent = 'Budget exhausted'; tog.className = 'btn-stop';
+        tog.disabled = true;
+      } else if (h.enabled) {
         tog.textContent = 'Disable Heater'; tog.className = 'btn-stop';
+        tog.disabled = false;
       } else {
         tog.textContent = 'Enable Heater'; tog.className = 'btn-start';
+        tog.disabled = false;
       }
+      document.getElementById('ht-autotune-btn').disabled = !!h.mah_cap_hit;
 
       // autotune bar
       const atBar = document.getElementById('ht-autotune-bar');
@@ -819,8 +879,12 @@
   }
 
   async function heaterToggle() {
-    await fetch('/api/heater', {method:'POST', headers:{'Content-Type':'application/json'},
+    const r = await fetch('/api/heater', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({enabled: !_htEnabled})});
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      if (d.error === 'mah_cap_exhausted') alert(d.message || '5 Ah heater budget exhausted — reset mAh first.');
+    }
     updateHeater();
   }
 
@@ -976,6 +1040,15 @@
   // ── Environmental sensors ────────────────────────────────────────────────
   function _sv(v, bad){ return (v===undefined||v===null||v===''||v===bad) ? null : v; }
 
+  // Hz rate fields: mark a field "dirty" the moment the user edits it, so the
+  // 5 s poll won't revert it before they hit Apply.
+  const _ivKeys = ['aht21','ens160','plantower','ds18b20','csv'];
+  const _ivDirty = new Set();
+  _ivKeys.forEach(k => {
+    const e = document.getElementById('iv-'+k);
+    if (e) e.addEventListener('input', () => _ivDirty.add(k));
+  });
+
   async function updateSensors() {
     try {
       const d = await fetch('/api/sensors').then(r => r.json());
@@ -995,17 +1068,19 @@
       const ds=(id,v,lab)=>{ v=_sv(v,-127); set(id, lab+' '+(v!==null?v.toFixed(1)+' °C':'--')); };
       ds('s-ds-cell', L.DS_cell, 'Cell'); ds('s-ds-env1', L.DS_env1, 'Env1'); ds('s-ds-env2', L.DS_env2, 'Env2');
 
-      // populate interval inputs (only when not focused, so edits aren't clobbered)
-      const iv = d.intervals || {};
-      for (const k of ['aht21','ens160','plantower','ds18b20','csv']) {
+      // Populate rate inputs in Hz, but NEVER clobber a field the user has edited
+      // (until they Apply) or is currently focused. _ivDirty tracks edited fields.
+      const hz = d.rates_hz || {};
+      for (const k of _ivKeys) {
         const e = document.getElementById('iv-'+k);
-        if (e && e !== document.activeElement && iv[k] !== undefined) e.value = iv[k];
+        if (e && e !== document.activeElement && !_ivDirty.has(k) && hz[k] !== undefined)
+          e.value = hz[k];
       }
 
       const age = document.getElementById('sensors-age');
       if (age) age.textContent = L.ts ? ('updated ' + new Date().toLocaleTimeString()) : 'no data yet';
       const rows = document.getElementById('sensors-rows');
-      if (rows) rows.textContent = (d.history ? d.history.length : 0) + ' rows logged · CSV every ' + (iv.csv||10) + ' s';
+      if (rows) rows.textContent = (d.history ? d.history.length : 0) + ' rows logged · CSV ' + (hz.csv||0.1) + ' Hz';
     } catch(e) { console.warn('sensors:', e); }
   }
 
@@ -1017,6 +1092,7 @@
     }
     try {
       await fetch('/api/sensors/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      _ivKeys.forEach(k => _ivDirty.delete(k));   // saved → let polls sync again
       const st = document.getElementById('iv-status');
       if (st) { st.textContent = '✓ saved'; setTimeout(()=>{ st.textContent=''; }, 2000); }
     } catch(e) { console.warn('intervals:', e); }
